@@ -1,0 +1,88 @@
+{
+  "name": "strapi-plugin-data-importer",
+  "version": "0.1.0",
+  "description": "A Strapi plugin to import records from CSV, JSON, and other file formats",
+  "keywords": [
+    "strapi",
+    "strapi-plugin",
+    "csv",
+    "json",
+    "import",
+    "data"
+  ],
+  "license": "MIT",
+  "author": "s-soya2421",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/s-soya2421/strapi-plugin-data-importer"
+  },
+  "strapi": {
+    "name": "data-importer",
+    "displayName": "Data Importer",
+    "description": "Import content records from CSV, JSON, and other file formats",
+    "kind": "plugin"
+  },
+  "exports": {
+    "./package.json": "./package.json",
+    "./strapi-admin": {
+      "source": "./admin/src/index.tsx",
+      "import": "./dist/admin/index.mjs",
+      "require": "./dist/admin/index.js",
+      "default": "./dist/admin/index.js"
+    },
+    "./strapi-server": {
+      "source": "./server/src/index.ts",
+      "import": "./dist/server/index.mjs",
+      "require": "./dist/server/index.js",
+      "default": "./dist/server/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "pack-up build",
+    "watch": "pack-up watch",
+    "test": "jest",
+    "test:server": "jest --testPathPattern=server/src/__tests__",
+    "test:admin": "jest --testPathPattern=admin/src/__tests__",
+    "lint": "tsc --noEmit"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "transform": {
+      "^.+\\.tsx?$": ["ts-jest", {
+        "tsconfig": {
+          "moduleResolution": "node",
+          "jsx": "react-jsx",
+          "esModuleInterop": true,
+          "baseUrl": ".",
+          "paths": {
+            "@strapi/admin/strapi-admin": ["admin/src/__mocks__/@strapi/admin/strapi-admin.ts"]
+          }
+        }
+      }]
+    },
+    "moduleNameMapper": {
+      "^@strapi/admin/strapi-admin$": "<rootDir>/admin/src/__mocks__/@strapi/admin/strapi-admin.ts"
+    }
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "peerDependencies": {
+    "@strapi/strapi": "^5.0.0"
+  },
+  "devDependencies": {
+    "@strapi/pack-up": "^5.0.0",
+    "@testing-library/jest-dom": "^6.0.0",
+    "@testing-library/react": "^16.0.0",
+    "@testing-library/user-event": "^14.0.0",
+    "@types/jest": "^29.0.0",
+    "@types/react": "^18.0.0",
+    "jest": "^29.0.0",
+    "jest-environment-jsdom": "^29.0.0",
+    "ts-jest": "^29.0.0",
+    "typescript": "^5.0.0"
+  }
+}
