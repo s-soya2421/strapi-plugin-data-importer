@@ -67,7 +67,7 @@ export default ({ strapi }: { strapi: any }) => {
 
     async getContentTypes() {
       const contentTypes = strapi.contentTypes;
-      const result: Array<{ uid: string; displayName: string; fields: Array<{ name: string; type: string; relationType?: string; multiple?: boolean }> }> = [];
+      const result: Array<{ uid: string; displayName: string; fields: Array<{ name: string; type: string; relationType?: string; multiple?: boolean; required?: boolean }> }> = [];
 
       for (const [uid, contentType] of Object.entries(contentTypes) as [string, any][]) {
         if (!uid.startsWith('api::')) continue;
@@ -78,12 +78,15 @@ export default ({ strapi }: { strapi: any }) => {
             return !['component', 'dynamiczone'].includes(type);
           })
           .map(([name, attr]) => {
-            const field: { name: string; type: string; relationType?: string; multiple?: boolean } = { name, type: attr.type };
+            const field: { name: string; type: string; relationType?: string; multiple?: boolean; required?: boolean } = { name, type: attr.type };
             if (attr.type === 'relation') {
               field.relationType = attr.relationType;
             }
             if (attr.type === 'media') {
               field.multiple = attr.multiple ?? false;
+            }
+            if (attr.required === true) {
+              field.required = true;
             }
             return field;
           });
@@ -128,13 +131,22 @@ export default ({ strapi }: { strapi: any }) => {
         const row = rows[i];
         const rowNum = batchOffset + i + 2;
 
-        // Feature 5: field type validation before data build
+        // Feature 5+6: field type and required validation before data build
         for (const [csvColumn, strapiField] of Object.entries(fieldMapping)) {
           if (!strapiField || !csvColumn) continue;
           const rawValue = row[csvColumn];
-          if (rawValue === undefined || rawValue === '') continue;
           const attr = attributes[strapiField];
           if (!attr) continue;
+
+          // Feature 6: required field check
+          if ((rawValue === undefined || rawValue === '') && attr.required === true) {
+            results.failed++;
+            results.failedRows.push(row);
+            results.errors.push(`Row ${rowNum}: field '${strapiField}' is required`);
+            continue outer;
+          }
+
+          if (rawValue === undefined || rawValue === '') continue;
           const validationError = validateValue(rawValue, attr, strapiField, rowNum);
           if (validationError) {
             results.failed++;

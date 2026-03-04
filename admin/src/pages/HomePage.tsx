@@ -9,6 +9,7 @@ interface FieldInfo {
   type: string;
   relationType?: string;
   multiple?: boolean;
+  required?: boolean;
 }
 
 interface ContentTypeInfo {
@@ -42,7 +43,7 @@ interface HistoryEntry {
 type FieldMapping = Record<string, string>; // { "CSV列名": "strapiField" }
 type AllMappings = Record<string, FieldMapping>; // { "api::uid": { ... } }
 
-const BATCH_SIZE = 100;
+const DEFAULT_BATCH_SIZE = 100;
 
 const HomePage = () => {
   const { get, post } = useFetchClient();
@@ -63,6 +64,9 @@ const HomePage = () => {
   const [importMode, setImportMode] = useState<'create' | 'upsert'>('create');
   const [keyField, setKeyField] = useState('');
   const [importProgress, setImportProgress] = useState<number | null>(null);
+  const [progressRows, setProgressRows] = useState<number | null>(null);
+  const [progressTotal, setProgressTotal] = useState<number | null>(null);
+  const [batchSize, setBatchSize] = useState(DEFAULT_BATCH_SIZE);
   const [failedRows, setFailedRows] = useState<Record<string, string>[]>([]);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -143,10 +147,13 @@ const HomePage = () => {
     setError(null);
     setImportResult(null);
     setImportProgress(0);
+    setProgressRows(null);
+    setProgressTotal(rowsToImport.length);
 
+    const effectiveBatchSize = Math.max(1, batchSize);
     const chunks: Record<string, string>[][] = [];
-    for (let i = 0; i < rowsToImport.length; i += BATCH_SIZE) {
-      chunks.push(rowsToImport.slice(i, i + BATCH_SIZE));
+    for (let i = 0; i < rowsToImport.length; i += effectiveBatchSize) {
+      chunks.push(rowsToImport.slice(i, i + effectiveBatchSize));
     }
 
     const accumulated: ImportResult = { success: 0, updated: 0, failed: 0, errors: [], failedRows: [] };
@@ -158,7 +165,7 @@ const HomePage = () => {
           rows: chunks[c],
           fieldMapping,
           dryRun,
-          batchOffset: offset + c * BATCH_SIZE,
+          batchOffset: offset + c * effectiveBatchSize,
           importMode,
           keyField: importMode === 'upsert' ? keyField : undefined,
           rollbackOnFailure,
@@ -172,6 +179,7 @@ const HomePage = () => {
           accumulated.failedRows.push(...(chunkResult.failedRows ?? []));
         }
         setImportProgress(Math.round(((c + 1) / chunks.length) * 100));
+        setProgressRows(Math.min((c + 1) * effectiveBatchSize, rowsToImport.length));
       }
       setImportResult(accumulated);
       setFailedRows(accumulated.failedRows);
@@ -192,6 +200,8 @@ const HomePage = () => {
     } finally {
       setLoading(false);
       setImportProgress(null);
+      setProgressRows(null);
+      setProgressTotal(null);
     }
   };
 
@@ -207,18 +217,24 @@ const HomePage = () => {
     setImportMode('create');
     setKeyField('');
     setImportProgress(null);
+    setProgressRows(null);
+    setProgressTotal(null);
+    setBatchSize(DEFAULT_BATCH_SIZE);
     setFailedRows([]);
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   const getFieldLabel = (f: FieldInfo) => {
+    let label: string;
     if (f.type === 'relation' && f.relationType) {
-      return `${f.name} (relation: ${f.relationType})`;
+      label = `${f.name} (relation: ${f.relationType})`;
+    } else if (f.type === 'media') {
+      label = `${f.name} (media: ${f.multiple ? 'multiple IDs' : 'single ID'})`;
+    } else {
+      label = `${f.name} (${f.type})`;
     }
-    if (f.type === 'media') {
-      return `${f.name} (media: ${f.multiple ? 'multiple IDs' : 'single ID'})`;
-    }
-    return `${f.name} (${f.type})`;
+    if (f.required) label += ' *';
+    return label;
   };
 
   const styles: Record<string, React.CSSProperties> = {
@@ -388,6 +404,11 @@ const HomePage = () => {
               })}
             </div>
           )}
+          {selectedContentType.fields.some((f) => f.required) && (
+            <p style={{ fontSize: '12px', color: '#666', marginBottom: '8px' }}>
+              {formatMessage({ id: 'data-importer.step3.requiredNote', defaultMessage: '* Required field' })}
+            </p>
+          )}
           <table style={styles.table}>
             <thead>
               <tr>
@@ -461,6 +482,19 @@ const HomePage = () => {
             </label>
           </div>
           <div style={{ marginBottom: '12px' }}>
+            <label style={styles.label}>
+              {formatMessage({ id: 'data-importer.step4.batchSize', defaultMessage: 'Batch size:' })}
+            </label>
+            <input
+              type="number"
+              min={1}
+              max={10000}
+              value={batchSize}
+              onChange={(e) => setBatchSize(Math.max(1, parseInt(e.target.value, 10) || 1))}
+              style={{ ...styles.input, width: '80px' }}
+            />
+          </div>
+          <div style={{ marginBottom: '12px' }}>
             <span style={{ fontWeight: 600, marginRight: '12px' }}>
               {formatMessage({ id: 'data-importer.step4.importMode', defaultMessage: 'Import mode:' })}
             </span>
@@ -529,6 +563,14 @@ const HomePage = () => {
           {loading && importProgress !== null && (
             <div style={styles.progressBar}>
               <div style={{ ...styles.progressFill, width: `${importProgress}%` }} />
+            </div>
+          )}
+          {loading && progressRows !== null && progressTotal !== null && (
+            <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+              {formatMessage(
+                { id: 'data-importer.step4.progressRows', defaultMessage: '{processed} / {total} rows' },
+                { processed: progressRows, total: progressTotal }
+              )}
             </div>
           )}
         </div>

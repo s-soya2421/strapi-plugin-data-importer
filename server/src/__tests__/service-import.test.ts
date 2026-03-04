@@ -152,6 +152,23 @@ describe('importService.getContentTypes()', () => {
     expect(fields).toContain('createdAt');
   });
 
+  test('required=true のフィールドに required プロパティが付与される', async () => {
+    const strapi = buildStrapi({
+      'api::post.post': buildContentType({
+        title: { type: 'string', required: true },
+        body: { type: 'text' },
+      }),
+    });
+
+    const service = importServiceFactory({ strapi });
+    const result = await service.getContentTypes();
+
+    const titleField = result[0].fields.find((f: any) => f.name === 'title');
+    const bodyField = result[0].fields.find((f: any) => f.name === 'body');
+    expect(titleField?.required).toBe(true);
+    expect(bodyField?.required).toBeUndefined();
+  });
+
   test('info.displayName がない場合は uid をフォールバックとして使う', async () => {
     const strapi = buildStrapi({
       'api::thing.thing': { attributes: { name: { type: 'string' } } },
@@ -869,6 +886,81 @@ describe('importService.importRecords()', () => {
 
       expect(result.failed).toBe(0);
       expect(result.success).toBe(1);
+    });
+  });
+
+  // ──────────────────────────
+  // Feature 6: 必須フィールドバリデーション
+  // ──────────────────────────
+  describe('必須フィールドバリデーション', () => {
+    test('required フィールドに値がない場合は失敗し create を呼ばない', async () => {
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const attrs = { title: { type: 'string', required: true } };
+      const strapi = buildStrapi({ [uid]: buildContentType(attrs) }, createFn);
+      const service = importServiceFactory({ strapi });
+
+      const result = await service.importRecords(uid, [{ col_title: '' }], { col_title: 'title' });
+
+      expect(createFn).not.toHaveBeenCalled();
+      expect(result.failed).toBe(1);
+      expect(result.failedRows[0]).toEqual({ col_title: '' });
+      expect(result.errors[0]).toMatch(/Row 2/);
+      expect(result.errors[0]).toMatch(/title/);
+      expect(result.errors[0]).toMatch(/required/);
+    });
+
+    test('required フィールドが undefined の場合も失敗する', async () => {
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const attrs = { title: { type: 'string', required: true } };
+      const strapi = buildStrapi({ [uid]: buildContentType(attrs) }, createFn);
+      const service = importServiceFactory({ strapi });
+
+      const result = await service.importRecords(uid, [{}], { col_title: 'title' });
+
+      expect(result.failed).toBe(1);
+      expect(result.errors[0]).toMatch(/title/);
+      expect(result.errors[0]).toMatch(/required/);
+    });
+
+    test('required フィールドに値がある場合は成功する', async () => {
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const attrs = { title: { type: 'string', required: true } };
+      const strapi = buildStrapi({ [uid]: buildContentType(attrs) }, createFn);
+      const service = importServiceFactory({ strapi });
+
+      const result = await service.importRecords(uid, [{ col_title: 'Hello' }], { col_title: 'title' });
+
+      expect(result.success).toBe(1);
+      expect(result.failed).toBe(0);
+    });
+
+    test('required でないフィールドは空文字でも成功する', async () => {
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const attrs = { title: { type: 'string' } };
+      const strapi = buildStrapi({ [uid]: buildContentType(attrs) }, createFn);
+      const service = importServiceFactory({ strapi });
+
+      const result = await service.importRecords(uid, [{ col_title: '' }], { col_title: 'title' });
+
+      expect(result.failed).toBe(0);
+      expect(result.success).toBe(1);
+    });
+
+    test('required 行は失敗し、その後の行は処理される', async () => {
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const attrs = { title: { type: 'string', required: true } };
+      const strapi = buildStrapi({ [uid]: buildContentType(attrs) }, createFn);
+      const service = importServiceFactory({ strapi });
+
+      const result = await service.importRecords(
+        uid,
+        [{ col_title: '' }, { col_title: 'Good' }],
+        { col_title: 'title' }
+      );
+
+      expect(result.failed).toBe(1);
+      expect(result.success).toBe(1);
+      expect(createFn).toHaveBeenCalledTimes(1);
     });
   });
 

@@ -58,7 +58,7 @@ const mockContentTypes = [
     uid: 'api::article.article',
     displayName: 'Article',
     fields: [
-      { name: 'title', type: 'string' },
+      { name: 'title', type: 'string', required: true },
       { name: 'body', type: 'text' },
     ],
   },
@@ -1115,5 +1115,115 @@ describe('HomePage', () => {
     await waitFor(() => {
       expect(mockGet).toHaveBeenCalledWith('/data-importer/history');
     });
+  });
+
+  // ── Feature 6: required field indicator ──────────────────────────────────
+
+  test('required field shows * in mapping dropdown options', async () => {
+    render(<HomePage />);
+    await waitFor(() => {
+      expect(screen.getByText('Article (api::article.article)')).toBeInTheDocument();
+    });
+
+    const select = screen.getAllByRole('combobox')[0];
+    fireEvent.change(select, { target: { value: 'api::article.article' } });
+
+    await simulateFileUpload();
+
+    await waitFor(() => {
+      expect(screen.getByText('Step 3: Map columns to Strapi fields')).toBeInTheDocument();
+    });
+
+    // title is required, so it should show * in label
+    expect(screen.getByText('title (string) *')).toBeInTheDocument();
+    // body is not required, no *
+    expect(screen.getByText('body (text)')).toBeInTheDocument();
+  });
+
+  test('shows required field note when content type has required fields', async () => {
+    render(<HomePage />);
+    await waitFor(() => {
+      expect(screen.getByText('Article (api::article.article)')).toBeInTheDocument();
+    });
+
+    const select = screen.getAllByRole('combobox')[0];
+    fireEvent.change(select, { target: { value: 'api::article.article' } });
+
+    await simulateFileUpload();
+
+    await waitFor(() => {
+      expect(screen.getByText('Step 3: Map columns to Strapi fields')).toBeInTheDocument();
+    });
+
+    expect(screen.getByText('* Required field')).toBeInTheDocument();
+  });
+
+  // ── Feature 8: batch size control ────────────────────────────────────────
+
+  test('shows batch size input in Step 4 with default value 100', async () => {
+    render(<HomePage />);
+    await waitFor(() => {
+      expect(screen.getByText('Article (api::article.article)')).toBeInTheDocument();
+    });
+
+    const select = screen.getAllByRole('combobox')[0];
+    fireEvent.change(select, { target: { value: 'api::article.article' } });
+
+    await simulateFileUpload();
+
+    await waitFor(() => {
+      expect(screen.getByText('Step 4: Run import')).toBeInTheDocument();
+    });
+
+    expect(screen.getByText('Batch size:')).toBeInTheDocument();
+    const batchInput = screen.getByDisplayValue('100');
+    expect(batchInput).toBeInTheDocument();
+    expect(batchInput).toHaveAttribute('type', 'number');
+  });
+
+  test('batch size input can be changed', async () => {
+    render(<HomePage />);
+    await waitFor(() => {
+      expect(screen.getByText('Article (api::article.article)')).toBeInTheDocument();
+    });
+
+    const select = screen.getAllByRole('combobox')[0];
+    fireEvent.change(select, { target: { value: 'api::article.article' } });
+
+    await simulateFileUpload();
+
+    await waitFor(() => {
+      expect(screen.getByText('Batch size:')).toBeInTheDocument();
+    });
+
+    const batchInput = screen.getByDisplayValue('100');
+    fireEvent.change(batchInput, { target: { value: '50' } });
+    expect(screen.getByDisplayValue('50')).toBeInTheDocument();
+  });
+
+  test('reset button resets batch size to 100', async () => {
+    render(<HomePage />);
+    await waitFor(() => {
+      expect(screen.getByText('Article (api::article.article)')).toBeInTheDocument();
+    });
+
+    const select = screen.getAllByRole('combobox')[0];
+    fireEvent.change(select, { target: { value: 'api::article.article' } });
+
+    await simulateFileUpload();
+
+    await waitFor(() => {
+      expect(screen.getByText('Batch size:')).toBeInTheDocument();
+    });
+
+    const batchInput = screen.getByDisplayValue('100');
+    fireEvent.change(batchInput, { target: { value: '25' } });
+    expect(screen.getByDisplayValue('25')).toBeInTheDocument();
+
+    const resetBtn = screen.getByText('Reset');
+    fireEvent.click(resetBtn);
+
+    // After reset Step 4 disappears
+    expect(screen.queryByText('Batch size:')).not.toBeInTheDocument();
   });
 });
