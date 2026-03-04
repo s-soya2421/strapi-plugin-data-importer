@@ -129,4 +129,49 @@ describe('parseJSON', () => {
       expect(rows[1]).toEqual({ 名前: '鈴木花子', 年齢: '22' });
     });
   });
+
+  // ──────────────────────────────
+  // ネストされた値の型変換
+  // ──────────────────────────────
+  describe('ネストされた値の型変換', () => {
+    test('documentId を持つオブジェクト配列はカンマ区切りの documentId に変換される', () => {
+      const json = JSON.stringify([
+        { title: 'Post', tags: [{ documentId: 'a' }, { documentId: 'b' }] },
+      ]);
+      const { rows } = parseJSON(json);
+      expect(rows[0].tags).toBe('a,b');
+    });
+
+    test('id を持つオブジェクト配列はカンマ区切りの id に変換される', () => {
+      const json = JSON.stringify([
+        { title: 'Post', media: [{ id: 1 }, { id: 2 }] },
+      ]);
+      const { rows } = parseJSON(json);
+      expect(rows[0].media).toBe('1,2');
+    });
+
+    test('プリミティブの配列はカンマ区切りの文字列に変換される', () => {
+      const json = JSON.stringify([{ nums: [1, 2, 3] }]);
+      const { rows } = parseJSON(json);
+      expect(rows[0].nums).toBe('1,2,3');
+    });
+
+    test('プレーンオブジェクトは JSON.stringify に変換される', () => {
+      const json = JSON.stringify([{ addr: { city: 'Tokyo' } }]);
+      const { rows } = parseJSON(json);
+      expect(rows[0].addr).toBe('{"city":"Tokyo"}');
+    });
+
+    test('documentId も id も持たないオブジェクト配列は JSON.stringify に変換される', () => {
+      const json = JSON.stringify([{ items: [{ name: 'a' }, { name: 'b' }] }]);
+      const { rows } = parseJSON(json);
+      expect(rows[0].items).toBe('[{"name":"a"},{"name":"b"}]');
+    });
+
+    test('空配列は空文字列に変換される', () => {
+      const json = JSON.stringify([{ items: [] }]);
+      const { rows } = parseJSON(json);
+      expect(rows[0].items).toBe('');
+    });
+  });
 });

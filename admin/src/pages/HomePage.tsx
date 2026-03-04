@@ -19,9 +19,23 @@ interface ContentTypeInfo {
 
 interface ImportResult {
   success: number;
+  updated: number;
   failed: number;
   errors: string[];
   failedRows: Record<string, string>[];
+}
+
+interface HistoryEntry {
+  id: string;
+  timestamp: string;
+  uid: string;
+  displayName: string;
+  dryRun: boolean;
+  mode: 'create' | 'upsert';
+  success: number;
+  updated: number;
+  failed: number;
+  totalRows: number;
 }
 
 // CSVヘッダー → Strapiフィールド名 のマッピング型
@@ -45,8 +59,11 @@ const HomePage = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dryRun, setDryRun] = useState(false);
+  const [importMode, setImportMode] = useState<'create' | 'upsert'>('create');
+  const [keyField, setKeyField] = useState('');
   const [importProgress, setImportProgress] = useState<number | null>(null);
   const [failedRows, setFailedRows] = useState<Record<string, string>[]>([]);
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -62,6 +79,12 @@ const HomePage = () => {
       );
     get('/data-importer/mappings')
       .then((res: any) => setAllMappings(res.data?.data ?? {}))
+      .catch(() => {});
+    get('/data-importer/history')
+      .then((res: any) => {
+        const data = res.data?.data;
+        setHistory(Array.isArray(data) ? data : []);
+      })
       .catch(() => {});
   }, []);
 
@@ -125,7 +148,7 @@ const HomePage = () => {
       chunks.push(rowsToImport.slice(i, i + BATCH_SIZE));
     }
 
-    const accumulated: ImportResult = { success: 0, failed: 0, errors: [], failedRows: [] };
+    const accumulated: ImportResult = { success: 0, updated: 0, failed: 0, errors: [], failedRows: [] };
 
     try {
       for (let c = 0; c < chunks.length; c++) {
@@ -135,10 +158,13 @@ const HomePage = () => {
           fieldMapping,
           dryRun,
           batchOffset: offset + c * BATCH_SIZE,
+          importMode,
+          keyField: importMode === 'upsert' ? keyField : undefined,
         });
         const chunkResult = res.data?.data;
         if (chunkResult) {
           accumulated.success += chunkResult.success ?? 0;
+          accumulated.updated += chunkResult.updated ?? 0;
           accumulated.failed += chunkResult.failed ?? 0;
           accumulated.errors.push(...(chunkResult.errors ?? []));
           accumulated.failedRows.push(...(chunkResult.failedRows ?? []));
@@ -147,6 +173,13 @@ const HomePage = () => {
       }
       setImportResult(accumulated);
       setFailedRows(accumulated.failedRows);
+      // Refresh history after import
+      get('/data-importer/history')
+        .then((res: any) => {
+          const data = res.data?.data;
+          setHistory(Array.isArray(data) ? data : []);
+        })
+        .catch(() => {});
     } catch (err: any) {
       setError(
         formatMessage(
@@ -168,6 +201,8 @@ const HomePage = () => {
     setError(null);
     setFileFormat('csv');
     setDryRun(false);
+    setImportMode('create');
+    setKeyField('');
     setImportProgress(null);
     setFailedRows([]);
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -412,6 +447,52 @@ const HomePage = () => {
               {formatMessage({ id: 'data-importer.step4.dryRun', defaultMessage: 'Dry run (no data will be written)' })}
             </label>
           </div>
+          <div style={{ marginBottom: '12px' }}>
+            <span style={{ fontWeight: 600, marginRight: '12px' }}>
+              {formatMessage({ id: 'data-importer.step4.importMode', defaultMessage: 'Import mode:' })}
+            </span>
+            <label style={{ marginRight: '12px', cursor: 'pointer' }}>
+              <input
+                type="radio"
+                name="importMode"
+                value="create"
+                checked={importMode === 'create'}
+                onChange={() => setImportMode('create')}
+                style={{ marginRight: '4px' }}
+              />
+              {formatMessage({ id: 'data-importer.step4.modeCreate', defaultMessage: 'Create only' })}
+            </label>
+            <label style={{ cursor: 'pointer' }}>
+              <input
+                type="radio"
+                name="importMode"
+                value="upsert"
+                checked={importMode === 'upsert'}
+                onChange={() => setImportMode('upsert')}
+                style={{ marginRight: '4px' }}
+              />
+              {formatMessage({ id: 'data-importer.step4.modeUpsert', defaultMessage: 'Upsert (create or update)' })}
+            </label>
+          </div>
+          {importMode === 'upsert' && (
+            <div style={{ marginBottom: '12px' }}>
+              <label style={styles.label}>
+                {formatMessage({ id: 'data-importer.step4.keyField', defaultMessage: 'Key field:' })}
+              </label>
+              <select
+                style={{ ...styles.select, width: 'auto' }}
+                value={keyField}
+                onChange={(e) => setKeyField(e.target.value)}
+              >
+                <option value="">
+                  {formatMessage({ id: 'data-importer.step4.keyFieldPlaceholder', defaultMessage: '-- Select key field --' })}
+                </option>
+                {selectedContentType?.fields.map((f) => (
+                  <option key={f.name} value={f.name}>{getFieldLabel(f)}</option>
+                ))}
+              </select>
+            </div>
+          )}
           <button
             style={{ ...styles.button, ...styles.primaryButton }}
             onClick={() => handleImport()}
@@ -453,8 +534,8 @@ const HomePage = () => {
           </label>
           <div style={styles.success}>
             {formatMessage(
-              { id: 'data-importer.step5.result', defaultMessage: 'Success: {success} | Failed: {failed}' },
-              { success: importResult.success, failed: importResult.failed }
+              { id: 'data-importer.step5.result', defaultMessage: 'Created: {success} | Updated: {updated} | Failed: {failed}' },
+              { success: importResult.success, updated: importResult.updated, failed: importResult.failed }
             )}
           </div>
           {importResult.errors.length > 0 && (
@@ -485,6 +566,49 @@ const HomePage = () => {
           )}
         </div>
       )}
+
+      {/* Import history */}
+      <div style={styles.section}>
+        <label style={styles.label}>
+          {formatMessage({ id: 'data-importer.history.label', defaultMessage: 'Import history' })}
+        </label>
+        {history.length === 0 ? (
+          <p>{formatMessage({ id: 'data-importer.history.empty', defaultMessage: 'No import history yet.' })}</p>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ ...styles.table, fontSize: '12px' }}>
+              <thead>
+                <tr>
+                  <th style={styles.th}>{formatMessage({ id: 'data-importer.history.timestamp', defaultMessage: 'Date/Time' })}</th>
+                  <th style={styles.th}>{formatMessage({ id: 'data-importer.history.contentType', defaultMessage: 'Content Type' })}</th>
+                  <th style={styles.th}>{formatMessage({ id: 'data-importer.history.mode', defaultMessage: 'Mode' })}</th>
+                  <th style={styles.th}>{formatMessage({ id: 'data-importer.history.created', defaultMessage: 'Created' })}</th>
+                  <th style={styles.th}>{formatMessage({ id: 'data-importer.history.updated', defaultMessage: 'Updated' })}</th>
+                  <th style={styles.th}>{formatMessage({ id: 'data-importer.history.failed', defaultMessage: 'Failed' })}</th>
+                  <th style={styles.th}>{formatMessage({ id: 'data-importer.history.dryRun', defaultMessage: 'Dry Run' })}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {history.slice(0, 10).map((entry) => (
+                  <tr key={entry.id}>
+                    <td style={styles.td}>{new Date(entry.timestamp).toLocaleString()}</td>
+                    <td style={styles.td}>{entry.displayName}</td>
+                    <td style={styles.td}>
+                      {entry.mode === 'upsert'
+                        ? formatMessage({ id: 'data-importer.history.modeUpsert', defaultMessage: 'Upsert' })
+                        : formatMessage({ id: 'data-importer.history.modeCreate', defaultMessage: 'Create' })}
+                    </td>
+                    <td style={styles.td}>{entry.success}</td>
+                    <td style={styles.td}>{entry.updated}</td>
+                    <td style={styles.td}>{entry.failed}</td>
+                    <td style={styles.td}>{entry.dryRun ? '✓' : ''}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   );
 };

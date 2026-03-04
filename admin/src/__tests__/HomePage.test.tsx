@@ -121,10 +121,13 @@ describe('HomePage', () => {
       if (url === '/data-importer/mappings') {
         return Promise.resolve({ data: { data: {} } });
       }
+      if (url === '/data-importer/history') {
+        return Promise.resolve({ data: { data: [] } });
+      }
       return Promise.resolve({ data: { data: null } });
     });
     mockPost.mockResolvedValue({
-      data: { data: { success: 2, failed: 0, errors: [], failedRows: [] } },
+      data: { data: { success: 2, updated: 0, failed: 0, errors: [], failedRows: [] } },
     });
   });
 
@@ -292,7 +295,7 @@ describe('HomePage', () => {
     await waitFor(() => {
       expect(screen.getByText('Step 5: Results')).toBeInTheDocument();
     });
-    expect(screen.getByText('Success: 2 | Failed: 0')).toBeInTheDocument();
+    expect(screen.getByText('Created: 2 | Updated: 0 | Failed: 0')).toBeInTheDocument();
     expect(mockPost).toHaveBeenCalledWith('/data-importer/import', expect.any(Object));
   });
 
@@ -535,6 +538,9 @@ describe('HomePage', () => {
       if (url === '/data-importer/mappings') {
         return Promise.resolve({ data: { data: {} } });
       }
+      if (url === '/data-importer/history') {
+        return Promise.resolve({ data: { data: [] } });
+      }
       return Promise.resolve({ data: { data: null } });
     });
 
@@ -590,6 +596,9 @@ describe('HomePage', () => {
       }
       if (url === '/data-importer/mappings') {
         return Promise.resolve({ data: { data: {} } });
+      }
+      if (url === '/data-importer/history') {
+        return Promise.resolve({ data: { data: [] } });
       }
       return Promise.resolve({ data: { data: null } });
     });
@@ -716,7 +725,7 @@ describe('HomePage', () => {
     await waitFor(() => {
       expect(screen.getByText('Step 5: Results')).toBeInTheDocument();
     });
-    expect(screen.getByText('Success: 2 | Failed: 0')).toBeInTheDocument();
+    expect(screen.getByText('Created: 2 | Updated: 0 | Failed: 0')).toBeInTheDocument();
     expect(mockPost).toHaveBeenCalledWith('/data-importer/import', expect.any(Object));
   });
 
@@ -743,5 +752,185 @@ describe('HomePage', () => {
 
     expect(screen.queryByText('Step 3: Map columns to Strapi fields')).not.toBeInTheDocument();
     expect(screen.queryByText('Step 4: Run import')).not.toBeInTheDocument();
+  });
+
+  // ── Upsert UI ─────────────────────────────────────────────────────────────
+
+  test('shows import mode radio buttons after file upload', async () => {
+    render(<HomePage />);
+    await waitFor(() => {
+      expect(screen.getByText('Article (api::article.article)')).toBeInTheDocument();
+    });
+
+    const select = screen.getAllByRole('combobox')[0];
+    fireEvent.change(select, { target: { value: 'api::article.article' } });
+
+    await simulateFileUpload();
+
+    await waitFor(() => {
+      expect(screen.getByText('Import mode:')).toBeInTheDocument();
+    });
+    expect(screen.getByText('Create only')).toBeInTheDocument();
+    expect(screen.getByText('Upsert (create or update)')).toBeInTheDocument();
+  });
+
+  test('key field dropdown is hidden when create mode is selected', async () => {
+    render(<HomePage />);
+    await waitFor(() => {
+      expect(screen.getByText('Article (api::article.article)')).toBeInTheDocument();
+    });
+
+    const select = screen.getAllByRole('combobox')[0];
+    fireEvent.change(select, { target: { value: 'api::article.article' } });
+
+    await simulateFileUpload();
+
+    await waitFor(() => {
+      expect(screen.getByText('Import mode:')).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText('Key field:')).not.toBeInTheDocument();
+  });
+
+  test('key field dropdown appears when upsert mode is selected', async () => {
+    render(<HomePage />);
+    await waitFor(() => {
+      expect(screen.getByText('Article (api::article.article)')).toBeInTheDocument();
+    });
+
+    const select = screen.getAllByRole('combobox')[0];
+    fireEvent.change(select, { target: { value: 'api::article.article' } });
+
+    await simulateFileUpload();
+
+    await waitFor(() => {
+      expect(screen.getByText('Import mode:')).toBeInTheDocument();
+    });
+
+    // Switch to upsert mode
+    const upsertRadio = screen.getByDisplayValue('upsert');
+    fireEvent.click(upsertRadio);
+
+    expect(screen.getByText('Key field:')).toBeInTheDocument();
+    expect(screen.getByText('-- Select key field --')).toBeInTheDocument();
+  });
+
+  test('passes importMode and keyField to the API', async () => {
+    render(<HomePage />);
+    await waitFor(() => {
+      expect(screen.getByText('Article (api::article.article)')).toBeInTheDocument();
+    });
+
+    const select = screen.getAllByRole('combobox')[0];
+    fireEvent.change(select, { target: { value: 'api::article.article' } });
+
+    await simulateFileUpload();
+
+    await waitFor(() => {
+      expect(screen.getByText('Step 4: Run import')).toBeInTheDocument();
+    });
+
+    // Switch to upsert
+    const upsertRadio = screen.getByDisplayValue('upsert');
+    fireEvent.click(upsertRadio);
+
+    // Select key field
+    const keyFieldSelect = screen.getAllByRole('combobox').find(
+      (el) => el.getAttribute('value') === '' && el.querySelector('option[value="title"]')
+    ) ?? screen.getAllByRole('combobox')[screen.getAllByRole('combobox').length - 1];
+    fireEvent.change(keyFieldSelect, { target: { value: 'title' } });
+
+    const importBtn = screen.getByText(/Import \d+ records/);
+    await act(async () => {
+      fireEvent.click(importBtn);
+    });
+
+    await waitFor(() => {
+      expect(mockPost).toHaveBeenCalledWith('/data-importer/import', expect.objectContaining({
+        importMode: 'upsert',
+        keyField: 'title',
+      }));
+    });
+  });
+
+  test('shows updated count in results', async () => {
+    mockPost.mockResolvedValue({
+      data: { data: { success: 1, updated: 2, failed: 0, errors: [], failedRows: [] } },
+    });
+
+    render(<HomePage />);
+    await waitFor(() => {
+      expect(screen.getByText('Article (api::article.article)')).toBeInTheDocument();
+    });
+
+    const select = screen.getAllByRole('combobox')[0];
+    fireEvent.change(select, { target: { value: 'api::article.article' } });
+
+    await simulateFileUpload();
+
+    await waitFor(() => {
+      expect(screen.getByText('Step 4: Run import')).toBeInTheDocument();
+    });
+
+    const importBtn = screen.getByText(/Import \d+ records/);
+    await act(async () => {
+      fireEvent.click(importBtn);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Created: 1 | Updated: 2 | Failed: 0')).toBeInTheDocument();
+    });
+  });
+
+  // ── Import history ────────────────────────────────────────────────────────
+
+  test('shows empty history message when no history', async () => {
+    render(<HomePage />);
+    await waitFor(() => {
+      expect(screen.getByText('Import history')).toBeInTheDocument();
+    });
+    expect(screen.getByText('No import history yet.')).toBeInTheDocument();
+  });
+
+  test('shows history table when history entries exist', async () => {
+    mockGet.mockImplementation((url: string) => {
+      if (url === '/data-importer/content-types') {
+        return Promise.resolve({ data: { data: mockContentTypes } });
+      }
+      if (url === '/data-importer/mappings') {
+        return Promise.resolve({ data: { data: {} } });
+      }
+      if (url === '/data-importer/history') {
+        return Promise.resolve({
+          data: {
+            data: [
+              { id: '1', timestamp: '2024-01-15T10:30:00.000Z', uid: 'api::article.article', displayName: 'Article', dryRun: false, mode: 'create', success: 5, updated: 0, failed: 1, totalRows: 6 },
+            ],
+          },
+        });
+      }
+      return Promise.resolve({ data: { data: null } });
+    });
+
+    render(<HomePage />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Import history')).toBeInTheDocument();
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText('No import history yet.')).not.toBeInTheDocument();
+    });
+
+    expect(screen.getByText('Date/Time')).toBeInTheDocument();
+    expect(screen.getByText('Content Type')).toBeInTheDocument();
+    expect(screen.getByText('Mode')).toBeInTheDocument();
+  });
+
+  test('history section calls GET /data-importer/history on mount', async () => {
+    render(<HomePage />);
+    await waitFor(() => {
+      expect(mockGet).toHaveBeenCalledWith('/data-importer/history');
+    });
   });
 });

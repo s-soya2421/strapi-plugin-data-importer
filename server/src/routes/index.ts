@@ -15,6 +15,12 @@ export default {
         config: { policies: [] },
       },
       {
+        method: 'GET',
+        path: '/history',
+        handler: 'import.getHistory',
+        config: { policies: [] },
+      },
+      {
         method: 'POST',
         path: '/import',
         handler: 'import.importRecords',
