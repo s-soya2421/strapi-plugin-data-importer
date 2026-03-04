@@ -157,6 +157,7 @@ describe('importController.importRecords()', () => {
       false,
       0,
       'create',
+      undefined,
       undefined
     );
   });
@@ -176,6 +177,7 @@ describe('importController.importRecords()', () => {
       true,
       0,
       'create',
+      undefined,
       undefined
     );
   });
@@ -195,6 +197,7 @@ describe('importController.importRecords()', () => {
       false,
       100,
       'create',
+      undefined,
       undefined
     );
   });
@@ -214,7 +217,28 @@ describe('importController.importRecords()', () => {
       false,
       0,
       'upsert',
-      'col_title'
+      'col_title',
+      undefined
+    );
+  });
+
+  test('rollbackOnFailure: true がサービスに渡る', async () => {
+    const importRecordsMock = jest.fn().mockResolvedValue({ success: 0, failed: 2, errors: ['Rolled back 1 record(s) due to errors.', 'Row 3: error'], failedRows: [{}, {}], updated: 0 });
+    const strapi = buildStrapi({ importRecords: importRecordsMock });
+
+    const controller = importControllerFactory({ strapi });
+    const ctx = buildCtx({ ...validBody, rollbackOnFailure: true });
+    await controller.importRecords(ctx);
+
+    expect(importRecordsMock).toHaveBeenCalledWith(
+      validBody.uid,
+      validBody.rows,
+      validBody.fieldMapping,
+      false,
+      0,
+      'create',
+      undefined,
+      true
     );
   });
 

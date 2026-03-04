@@ -1,6 +1,6 @@
 {
   "name": "strapi-plugin-data-importer",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A Strapi plugin to import records from CSV, JSON, and other file formats",
   "keywords": [
     "strapi",

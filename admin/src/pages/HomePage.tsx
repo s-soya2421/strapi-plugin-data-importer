@@ -59,6 +59,7 @@ const HomePage = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dryRun, setDryRun] = useState(false);
+  const [rollbackOnFailure, setRollbackOnFailure] = useState(false);
   const [importMode, setImportMode] = useState<'create' | 'upsert'>('create');
   const [keyField, setKeyField] = useState('');
   const [importProgress, setImportProgress] = useState<number | null>(null);
@@ -160,6 +161,7 @@ const HomePage = () => {
           batchOffset: offset + c * BATCH_SIZE,
           importMode,
           keyField: importMode === 'upsert' ? keyField : undefined,
+          rollbackOnFailure,
         });
         const chunkResult = res.data?.data;
         if (chunkResult) {
@@ -201,6 +203,7 @@ const HomePage = () => {
     setError(null);
     setFileFormat('csv');
     setDryRun(false);
+    setRollbackOnFailure(false);
     setImportMode('create');
     setKeyField('');
     setImportProgress(null);
@@ -448,6 +451,16 @@ const HomePage = () => {
             </label>
           </div>
           <div style={{ marginBottom: '12px' }}>
+            <label style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <input
+                type="checkbox"
+                checked={rollbackOnFailure}
+                onChange={(e) => setRollbackOnFailure(e.target.checked)}
+              />
+              {formatMessage({ id: 'data-importer.step4.rollbackOnFailure', defaultMessage: 'Rollback on failure (undo creates if any row fails)' })}
+            </label>
+          </div>
+          <div style={{ marginBottom: '12px' }}>
             <span style={{ fontWeight: 600, marginRight: '12px' }}>
               {formatMessage({ id: 'data-importer.step4.importMode', defaultMessage: 'Import mode:' })}
             </span>
@@ -540,14 +553,44 @@ const HomePage = () => {
           </div>
           {importResult.errors.length > 0 && (
             <div style={{ marginTop: '12px' }}>
-              <strong>
-                {formatMessage({ id: 'data-importer.step5.errorDetails', defaultMessage: 'Error details:' })}
-              </strong>
-              <ul style={{ marginTop: '8px', paddingLeft: '20px' }}>
-                {importResult.errors.map((e, i) => (
-                  <li key={i} style={{ color: '#d02b20', fontSize: '13px' }}>{e}</li>
-                ))}
-              </ul>
+              {failedRows.length > 0 && (
+                <>
+                  <strong>
+                    {formatMessage({ id: 'data-importer.step5.failedRowsTable', defaultMessage: 'Failed row details:' })}
+                  </strong>
+                  <div style={{ overflowX: 'auto', marginTop: '8px' }}>
+                    <table style={{ ...styles.table, fontSize: '12px' }}>
+                      <thead>
+                        <tr>
+                          <th style={styles.th}>
+                            {formatMessage({ id: 'data-importer.step5.errorDetails', defaultMessage: 'Error details:' })}
+                          </th>
+                          {csvHeaders.map((h) => (
+                            <th key={h} style={styles.th}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {importResult.errors.slice(0, failedRows.length).map((err, i) => (
+                          <tr key={i}>
+                            <td style={{ ...styles.td, color: '#d02b20' }}>{err}</td>
+                            {csvHeaders.map((h) => (
+                              <td key={h} style={styles.td}>{failedRows[i]?.[h] ?? ''}</td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+              {importResult.errors.length > failedRows.length && (
+                <ul style={{ marginTop: '8px', paddingLeft: '20px' }}>
+                  {importResult.errors.slice(failedRows.length).map((e, i) => (
+                    <li key={i} style={{ color: '#d02b20', fontSize: '13px' }}>{e}</li>
+                  ))}
+                </ul>
+              )}
             </div>
           )}
           {failedRows.length > 0 && (
