@@ -6,14 +6,21 @@ jest.mock('fs');
 // ────────────────────────────
 // Strapi モックヘルパー
 // ────────────────────────────
-function buildStrapi(contentTypes: Record<string, any>, createFn?: jest.Mock) {
+function buildStrapi(contentTypes: Record<string, any>, createFn?: jest.Mock, extraDocMethods: Record<string, jest.Mock> = {}) {
   return {
     contentTypes,
     documents: jest.fn().mockReturnValue({
       create: createFn ?? jest.fn().mockResolvedValue({ documentId: 'doc-1' }),
+      findMany: jest.fn().mockResolvedValue([]),
+      update: jest.fn().mockResolvedValue({ documentId: 'doc-1' }),
+      ...extraDocMethods,
     }),
   };
 }
+
+afterEach(() => {
+  jest.clearAllMocks();
+});
 
 function buildContentType(attributes: Record<string, any>, displayName = 'Test') {
   return { info: { displayName }, attributes };
@@ -707,5 +714,152 @@ describe('importService.importRecords()', () => {
         data: { title: 'My Post', score: 10, published: true },
       });
     });
+  });
+
+  // ──────────────────────────
+  // upsert モード
+  // ──────────────────────────
+  describe('upsert モード', () => {
+    test('既存レコードが見つかった場合は update を呼び updated をカウントする', async () => {
+      const findManyFn = jest.fn().mockResolvedValue([{ documentId: 'existing-doc' }]);
+      const updateFn = jest.fn().mockResolvedValue({ documentId: 'existing-doc' });
+      const createFn = jest.fn();
+      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn, {
+        findMany: findManyFn,
+        update: updateFn,
+      });
+      const service = importServiceFactory({ strapi });
+
+      const result = await service.importRecords(
+        uid,
+        [{ col_title: 'Hello' }],
+        { col_title: 'title' },
+        false,
+        0,
+        'upsert',
+        'title'
+      );
+
+      expect(createFn).not.toHaveBeenCalled();
+      expect(updateFn).toHaveBeenCalledWith(
+        expect.objectContaining({ documentId: 'existing-doc' })
+      );
+      expect(result.updated).toBe(1);
+      expect(result.success).toBe(0);
+    });
+
+    test('既存レコードが見つからない場合は create を呼び success をカウントする', async () => {
+      const findManyFn = jest.fn().mockResolvedValue([]);
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'new-doc' });
+      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn, {
+        findMany: findManyFn,
+      });
+      const service = importServiceFactory({ strapi });
+
+      const result = await service.importRecords(
+        uid,
+        [{ col_title: 'New' }],
+        { col_title: 'title' },
+        false,
+        0,
+        'upsert',
+        'title'
+      );
+
+      expect(createFn).toHaveBeenCalled();
+      expect(result.success).toBe(1);
+      expect(result.updated).toBe(0);
+    });
+
+    test('keyField が指定されていない場合は通常 create を呼ぶ', async () => {
+      const findManyFn = jest.fn();
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn, {
+        findMany: findManyFn,
+      });
+      const service = importServiceFactory({ strapi });
+
+      const result = await service.importRecords(
+        uid,
+        [{ col_title: 'Hello' }],
+        { col_title: 'title' },
+        false,
+        0,
+        'upsert'
+        // keyField は未指定
+      );
+
+      expect(findManyFn).not.toHaveBeenCalled();
+      expect(createFn).toHaveBeenCalled();
+      expect(result.success).toBe(1);
+    });
+
+    test('importMode=create では findMany を呼ばない', async () => {
+      const findManyFn = jest.fn();
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn, {
+        findMany: findManyFn,
+      });
+      const service = importServiceFactory({ strapi });
+
+      await service.importRecords(
+        uid,
+        [{ col_title: 'Hello' }],
+        { col_title: 'title' },
+        false,
+        0,
+        'create',
+        'title'
+      );
+
+      expect(findManyFn).not.toHaveBeenCalled();
+    });
+
+    test('戻り値に updated フィールドが含まれる', async () => {
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn);
+      const service = importServiceFactory({ strapi });
+
+      const result = await service.importRecords(uid, [{ col_title: 'A' }], { col_title: 'title' });
+
+      expect(result).toHaveProperty('updated');
+      expect(result.updated).toBe(0);
+    });
+  });
+});
+
+// ────────────────────────────
+// getHistory
+// ────────────────────────────
+describe('importService.getHistory()', () => {
+  test('ファイルが存在しない場合は空配列を返す', async () => {
+    (fs.readFileSync as jest.Mock).mockImplementation(() => { throw new Error('ENOENT'); });
+    const service = importServiceFactory({ strapi: buildStrapi({}) });
+    const result = await service.getHistory();
+    expect(result).toEqual([]);
+  });
+
+  test('ファイルが存在する場合はエントリーを返す', async () => {
+    const entries = [
+      { id: '1', timestamp: '2024-01-01T00:00:00.000Z', uid: 'api::test.test', displayName: 'Test', dryRun: false, mode: 'create', success: 5, updated: 0, failed: 0, totalRows: 5 },
+    ];
+    (fs.readFileSync as jest.Mock).mockReturnValue(JSON.stringify(entries));
+    const service = importServiceFactory({ strapi: buildStrapi({}) });
+    const result = await service.getHistory();
+    expect(result).toEqual(entries);
+  });
+
+  test('ファイルの内容が配列でない場合は空配列を返す', async () => {
+    (fs.readFileSync as jest.Mock).mockReturnValue(JSON.stringify({ foo: 'bar' }));
+    const service = importServiceFactory({ strapi: buildStrapi({}) });
+    const result = await service.getHistory();
+    expect(result).toEqual([]);
+  });
+
+  test('不正な JSON の場合は空配列を返す', async () => {
+    (fs.readFileSync as jest.Mock).mockReturnValue('invalid json');
+    const service = importServiceFactory({ strapi: buildStrapi({}) });
+    const result = await service.getHistory();
+    expect(result).toEqual([]);
   });
 });
