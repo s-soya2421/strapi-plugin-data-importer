@@ -13,6 +13,7 @@ function buildStrapi(contentTypes: Record<string, any>, createFn?: jest.Mock, ex
       create: createFn ?? jest.fn().mockResolvedValue({ documentId: 'doc-1' }),
       findMany: jest.fn().mockResolvedValue([]),
       update: jest.fn().mockResolvedValue({ documentId: 'doc-1' }),
+      delete: jest.fn().mockResolvedValue({}),
       ...extraDocMethods,
     }),
   };
@@ -713,6 +714,300 @@ describe('importService.importRecords()', () => {
       expect(createFn).toHaveBeenCalledWith({
         data: { title: 'My Post', score: 10, published: true },
       });
+    });
+  });
+
+  // ──────────────────────────
+  // Feature 5: フィールド型バリデーション
+  // ──────────────────────────
+  describe('フィールド型バリデーション', () => {
+    test('integer フィールドに非数値を渡すと失敗しcreateは呼ばれない', async () => {
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn);
+      const service = importServiceFactory({ strapi });
+
+      const result = await service.importRecords(uid, [{ col_score: 'abc' }], { col_score: 'score' });
+
+      expect(createFn).not.toHaveBeenCalled();
+      expect(result.failed).toBe(1);
+      expect(result.failedRows[0]).toEqual({ col_score: 'abc' });
+      expect(result.errors[0]).toMatch(/Row 2/);
+      expect(result.errors[0]).toMatch(/score/);
+      expect(result.errors[0]).toMatch(/integer/);
+    });
+
+    test('biginteger フィールドに小数を渡すと失敗する', async () => {
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn);
+      const service = importServiceFactory({ strapi });
+
+      const result = await service.importRecords(uid, [{ col_views: '3.14' }], { col_views: 'views' });
+
+      expect(result.failed).toBe(1);
+      expect(result.errors[0]).toMatch(/views/);
+      expect(result.errors[0]).toMatch(/integer/);
+    });
+
+    test('decimal フィールドに非数値を渡すと失敗する', async () => {
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn);
+      const service = importServiceFactory({ strapi });
+
+      const result = await service.importRecords(uid, [{ col_price: 'not-a-number' }], { col_price: 'price' });
+
+      expect(result.failed).toBe(1);
+      expect(result.errors[0]).toMatch(/price/);
+      expect(result.errors[0]).toMatch(/number/);
+    });
+
+    test('float フィールドに非数値を渡すと失敗する', async () => {
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn);
+      const service = importServiceFactory({ strapi });
+
+      const result = await service.importRecords(uid, [{ col_ratio: 'xyz' }], { col_ratio: 'ratio' });
+
+      expect(result.failed).toBe(1);
+      expect(result.errors[0]).toMatch(/ratio/);
+    });
+
+    test('boolean フィールドに "yes" を渡すと失敗する', async () => {
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn);
+      const service = importServiceFactory({ strapi });
+
+      const result = await service.importRecords(uid, [{ col_pub: 'yes' }], { col_pub: 'published' });
+
+      expect(result.failed).toBe(1);
+      expect(result.errors[0]).toMatch(/published/);
+      expect(result.errors[0]).toMatch(/boolean/);
+    });
+
+    test('boolean フィールドに有効な値を渡すと成功する', async () => {
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn);
+      const service = importServiceFactory({ strapi });
+
+      for (const val of ['true', 'false', '1', '0', 'True', 'FALSE']) {
+        jest.clearAllMocks();
+        const result = await service.importRecords(uid, [{ col_pub: val }], { col_pub: 'published' });
+        expect(result.failed).toBe(0);
+      }
+    });
+
+    test('email フィールドに無効な値を渡すと失敗する', async () => {
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const attrs = { ...attributes, email: { type: 'email' } };
+      const strapi = buildStrapi({ [uid]: buildContentType(attrs) }, createFn);
+      const service = importServiceFactory({ strapi });
+
+      const result = await service.importRecords(uid, [{ col_email: 'not-an-email' }], { col_email: 'email' });
+
+      expect(result.failed).toBe(1);
+      expect(result.errors[0]).toMatch(/email/);
+    });
+
+    test('email フィールドに有効なメールを渡すと成功する', async () => {
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const attrs = { ...attributes, email: { type: 'email' } };
+      const strapi = buildStrapi({ [uid]: buildContentType(attrs) }, createFn);
+      const service = importServiceFactory({ strapi });
+
+      const result = await service.importRecords(uid, [{ col_email: 'test@example.com' }], { col_email: 'email' });
+
+      expect(result.success).toBe(1);
+      expect(result.failed).toBe(0);
+    });
+
+    test('enumeration フィールドに無効な値を渡すと失敗する', async () => {
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const attrs = { ...attributes, status: { type: 'enumeration', enum: ['draft', 'published', 'archived'] } };
+      const strapi = buildStrapi({ [uid]: buildContentType(attrs) }, createFn);
+      const service = importServiceFactory({ strapi });
+
+      const result = await service.importRecords(uid, [{ col_status: 'pending' }], { col_status: 'status' });
+
+      expect(result.failed).toBe(1);
+      expect(result.errors[0]).toMatch(/status/);
+      expect(result.errors[0]).toMatch(/draft, published, archived/);
+    });
+
+    test('enumeration フィールドに有効な値を渡すと成功する', async () => {
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const attrs = { ...attributes, status: { type: 'enumeration', enum: ['draft', 'published', 'archived'] } };
+      const strapi = buildStrapi({ [uid]: buildContentType(attrs) }, createFn);
+      const service = importServiceFactory({ strapi });
+
+      const result = await service.importRecords(uid, [{ col_status: 'draft' }], { col_status: 'status' });
+
+      expect(result.success).toBe(1);
+      expect(result.failed).toBe(0);
+    });
+
+    test('バリデーションエラーの行はスキップし他の行は処理される', async () => {
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn);
+      const service = importServiceFactory({ strapi });
+
+      const result = await service.importRecords(
+        uid,
+        [{ col_score: 'abc' }, { col_score: '42' }],
+        { col_score: 'score' }
+      );
+
+      expect(createFn).toHaveBeenCalledTimes(1);
+      expect(result.success).toBe(1);
+      expect(result.failed).toBe(1);
+    });
+
+    test('空文字列の値はバリデーションをスキップする（オプション扱い）', async () => {
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn);
+      const service = importServiceFactory({ strapi });
+
+      const result = await service.importRecords(uid, [{ col_score: '' }], { col_score: 'score' });
+
+      expect(result.failed).toBe(0);
+      expect(result.success).toBe(1);
+    });
+  });
+
+  // ──────────────────────────
+  // Feature 4: ロールバック
+  // ──────────────────────────
+  describe('ロールバック (rollbackOnFailure)', () => {
+    test('rollbackOnFailure=true で失敗行があると作成済みレコードを削除する', async () => {
+      const deleteFn = jest.fn().mockResolvedValue({});
+      const createFn = jest.fn()
+        .mockResolvedValueOnce({ documentId: 'doc-1' })
+        .mockRejectedValueOnce(new Error('DB error'));
+      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn, { delete: deleteFn });
+      const service = importServiceFactory({ strapi });
+
+      const result = await service.importRecords(
+        uid,
+        [{ col_title: 'A' }, { col_title: 'B' }],
+        { col_title: 'title' },
+        false, 0, 'create', undefined,
+        true // rollbackOnFailure
+      );
+
+      expect(deleteFn).toHaveBeenCalledWith({ documentId: 'doc-1' });
+      expect(result.success).toBe(0);
+      expect(result.failed).toBe(2);
+      expect(result.failedRows).toHaveLength(2);
+      expect(result.errors[0]).toMatch(/Rolled back 1 record/);
+    });
+
+    test('rollbackOnFailure=true で成功行が failedRows に追加される', async () => {
+      const deleteFn = jest.fn().mockResolvedValue({});
+      const createFn = jest.fn()
+        .mockResolvedValueOnce({ documentId: 'doc-1' })
+        .mockRejectedValueOnce(new Error('DB error'));
+      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn, { delete: deleteFn });
+      const service = importServiceFactory({ strapi });
+
+      const result = await service.importRecords(
+        uid,
+        [{ col_title: 'A' }, { col_title: 'B' }],
+        { col_title: 'title' },
+        false, 0, 'create', undefined,
+        true
+      );
+
+      // failedRows should contain both: original failed (B) and rolled-back succeeded (A)
+      expect(result.failedRows).toHaveLength(2);
+      const titles = result.failedRows.map((r) => r.col_title);
+      expect(titles).toContain('A');
+      expect(titles).toContain('B');
+    });
+
+    test('rollbackOnFailure=true で全行成功の場合はロールバックしない', async () => {
+      const deleteFn = jest.fn().mockResolvedValue({});
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn, { delete: deleteFn });
+      const service = importServiceFactory({ strapi });
+
+      const result = await service.importRecords(
+        uid,
+        [{ col_title: 'A' }, { col_title: 'B' }],
+        { col_title: 'title' },
+        false, 0, 'create', undefined,
+        true
+      );
+
+      expect(deleteFn).not.toHaveBeenCalled();
+      expect(result.success).toBe(2);
+      expect(result.failed).toBe(0);
+      expect(result.errors).toHaveLength(0);
+    });
+
+    test('rollbackOnFailure=false (デフォルト) の場合はロールバックしない', async () => {
+      const deleteFn = jest.fn().mockResolvedValue({});
+      const createFn = jest.fn()
+        .mockResolvedValueOnce({ documentId: 'doc-1' })
+        .mockRejectedValueOnce(new Error('DB error'));
+      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn, { delete: deleteFn });
+      const service = importServiceFactory({ strapi });
+
+      const result = await service.importRecords(
+        uid,
+        [{ col_title: 'A' }, { col_title: 'B' }],
+        { col_title: 'title' }
+      );
+
+      expect(deleteFn).not.toHaveBeenCalled();
+      expect(result.success).toBe(1);
+      expect(result.failed).toBe(1);
+    });
+
+    test('rollbackOnFailure=true でもdryRun=true の場合はロールバックしない', async () => {
+      const deleteFn = jest.fn().mockResolvedValue({});
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn, { delete: deleteFn });
+      const service = importServiceFactory({ strapi });
+
+      // Use validation error to create a failed row without needing create() to throw
+      const result = await service.importRecords(
+        uid,
+        [{ col_score: 'not-a-number' }],
+        { col_score: 'score' },
+        true,  // dryRun
+        0, 'create', undefined,
+        true   // rollbackOnFailure
+      );
+
+      expect(deleteFn).not.toHaveBeenCalled();
+      expect(result.failed).toBe(1);
+      expect(result.errors.some((e) => e.includes('Rolled back'))).toBe(false);
+    });
+
+    test('ロールバック後は success=0, updated=0 になる', async () => {
+      const deleteFn = jest.fn().mockResolvedValue({});
+      // Row A finds existing → update; Row B finds nothing → create (which fails)
+      const findManyFn = jest.fn()
+        .mockResolvedValueOnce([{ documentId: 'existing-doc' }])
+        .mockResolvedValueOnce([]);
+      const updateFn = jest.fn().mockResolvedValue({ documentId: 'existing-doc' });
+      const createFn = jest.fn().mockRejectedValue(new Error('DB error'));
+      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn, {
+        delete: deleteFn,
+        findMany: findManyFn,
+        update: updateFn,
+      });
+      const service = importServiceFactory({ strapi });
+
+      // Row A: upsert-update (updated++), Row B: create fails → rollback resets updated=0
+      const result = await service.importRecords(
+        uid,
+        [{ col_title: 'existing' }, { col_title: 'new-fail' }],
+        { col_title: 'title' },
+        false, 0, 'upsert', 'title',
+        true
+      );
+
+      expect(result.success).toBe(0);
+      expect(result.updated).toBe(0);
     });
   });
 

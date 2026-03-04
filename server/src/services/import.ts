@@ -3,6 +3,32 @@ import path from 'path';
 
 const DATE_TYPES = ['date', 'datetime', 'time'];
 
+function validateValue(value: string, attr: any, fieldName: string, rowNum: number): string | null {
+  const type = attr.type;
+  if (type === 'integer' || type === 'biginteger') {
+    if (!/^-?\d+$/.test(value)) {
+      return `Row ${rowNum}: field '${fieldName}' expects integer, got '${value}'`;
+    }
+  } else if (type === 'float' || type === 'decimal') {
+    if (isNaN(parseFloat(value))) {
+      return `Row ${rowNum}: field '${fieldName}' expects number, got '${value}'`;
+    }
+  } else if (type === 'boolean') {
+    if (!['true', 'false', '1', '0'].includes(value.toLowerCase())) {
+      return `Row ${rowNum}: field '${fieldName}' expects boolean (true/false/1/0), got '${value}'`;
+    }
+  } else if (type === 'email') {
+    if (!/@.+\..+/.test(value)) {
+      return `Row ${rowNum}: field '${fieldName}' expects email, got '${value}'`;
+    }
+  } else if (type === 'enumeration') {
+    if (!attr.enum?.includes(value)) {
+      return `Row ${rowNum}: field '${fieldName}' expects one of [${attr.enum?.join(', ') ?? ''}], got '${value}'`;
+    }
+  }
+  return null;
+}
+
 export interface HistoryEntry {
   id: string;
   timestamp: string;
@@ -83,7 +109,8 @@ export default ({ strapi }: { strapi: any }) => {
       dryRun = false,
       batchOffset = 0,
       importMode: 'create' | 'upsert' = 'create',
-      keyField?: string
+      keyField?: string,
+      rollbackOnFailure = false
     ) {
       const contentType = strapi.contentTypes[uid];
       if (!contentType) {
@@ -94,9 +121,29 @@ export default ({ strapi }: { strapi: any }) => {
       const results = { success: 0, updated: 0, failed: 0, errors: [] as string[], failedRows: [] as Record<string, string>[] };
 
       const mappedStrapiFields = new Set(Object.values(fieldMapping).filter(Boolean));
+      const createdDocumentIds: string[] = [];
+      const succeededRows: Record<string, string>[] = [];
 
-      for (let i = 0; i < rows.length; i++) {
+      outer: for (let i = 0; i < rows.length; i++) {
         const row = rows[i];
+        const rowNum = batchOffset + i + 2;
+
+        // Feature 5: field type validation before data build
+        for (const [csvColumn, strapiField] of Object.entries(fieldMapping)) {
+          if (!strapiField || !csvColumn) continue;
+          const rawValue = row[csvColumn];
+          if (rawValue === undefined || rawValue === '') continue;
+          const attr = attributes[strapiField];
+          if (!attr) continue;
+          const validationError = validateValue(rawValue, attr, strapiField, rowNum);
+          if (validationError) {
+            results.failed++;
+            results.failedRows.push(row);
+            results.errors.push(validationError);
+            continue outer;
+          }
+        }
+
         const data: Record<string, any> = {};
 
         for (const [csvColumn, strapiField] of Object.entries(fieldMapping)) {
@@ -140,8 +187,6 @@ export default ({ strapi }: { strapi: any }) => {
           }
         }
 
-        const rowNum = batchOffset + i + 2;
-
         try {
           if (!dryRun) {
             if (importMode === 'upsert' && keyField && data[keyField] !== undefined) {
@@ -155,9 +200,11 @@ export default ({ strapi }: { strapi: any }) => {
                 continue;
               }
             }
-            await strapi.documents(uid).create({ data });
+            const created = await strapi.documents(uid).create({ data });
+            if (rollbackOnFailure) createdDocumentIds.push(created.documentId);
           }
           results.success++;
+          if (rollbackOnFailure) succeededRows.push(row);
         } catch (err: any) {
           results.failed++;
           results.failedRows.push(row);
@@ -167,6 +214,18 @@ export default ({ strapi }: { strapi: any }) => {
           const detail = details.length > 0 ? ` (${details.join(', ')})` : '';
           results.errors.push(`Row ${rowNum}: ${err.message ?? String(err)}${detail}`);
         }
+      }
+
+      // Feature 4: rollback created records if any row failed
+      if (rollbackOnFailure && results.failed > 0 && !dryRun) {
+        for (const documentId of createdDocumentIds) {
+          await strapi.documents(uid).delete({ documentId });
+        }
+        results.failed += results.success;
+        results.failedRows.push(...succeededRows);
+        results.success = 0;
+        results.updated = 0;
+        results.errors.unshift(`Rolled back ${createdDocumentIds.length} record(s) due to errors.`);
       }
 
       try {

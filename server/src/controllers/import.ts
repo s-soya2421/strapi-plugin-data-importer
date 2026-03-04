@@ -18,14 +18,14 @@ export default ({ strapi }: { strapi: any }) => ({
   },
 
   async importRecords(ctx: any) {
-    const { uid, rows, fieldMapping, dryRun = false, batchOffset = 0, importMode = 'create', keyField } = ctx.request.body;
+    const { uid, rows, fieldMapping, dryRun = false, batchOffset = 0, importMode = 'create', keyField, rollbackOnFailure } = ctx.request.body;
 
     if (!uid || !Array.isArray(rows) || !fieldMapping) {
       return ctx.badRequest('uid, rows, and fieldMapping are required');
     }
 
     const service = strapi.plugin('data-importer').service('import');
-    const result = await service.importRecords(uid, rows, fieldMapping, dryRun, batchOffset, importMode, keyField);
+    const result = await service.importRecords(uid, rows, fieldMapping, dryRun, batchOffset, importMode, keyField, rollbackOnFailure);
     ctx.body = { data: result };
   },
 });

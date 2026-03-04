@@ -344,8 +344,8 @@ describe('HomePage', () => {
     });
 
     expect(screen.getByText('Dry run (no data will be written)')).toBeInTheDocument();
-    const checkbox = screen.getByRole('checkbox');
-    expect(checkbox).not.toBeChecked();
+    const checkboxes = screen.getAllByRole('checkbox');
+    expect(checkboxes[0]).not.toBeChecked();
   });
 
   test('dry-run checkbox can be toggled', async () => {
@@ -363,9 +363,9 @@ describe('HomePage', () => {
       expect(screen.getByText('Step 4: Run import')).toBeInTheDocument();
     });
 
-    const checkbox = screen.getByRole('checkbox');
-    fireEvent.click(checkbox);
-    expect(checkbox).toBeChecked();
+    const checkboxes = screen.getAllByRole('checkbox');
+    fireEvent.click(checkboxes[0]);
+    expect(checkboxes[0]).toBeChecked();
   });
 
   test('passes dryRun=true to the API when checkbox is checked', async () => {
@@ -383,8 +383,8 @@ describe('HomePage', () => {
       expect(screen.getByText('Step 4: Run import')).toBeInTheDocument();
     });
 
-    const checkbox = screen.getByRole('checkbox');
-    fireEvent.click(checkbox);
+    const checkboxes = screen.getAllByRole('checkbox');
+    fireEvent.click(checkboxes[0]);
 
     const importBtn = screen.getByText(/Import \d+ records/);
     await act(async () => {
@@ -411,8 +411,8 @@ describe('HomePage', () => {
       expect(screen.getByText('Step 4: Run import')).toBeInTheDocument();
     });
 
-    const checkbox = screen.getByRole('checkbox');
-    fireEvent.click(checkbox);
+    const checkboxes = screen.getAllByRole('checkbox');
+    fireEvent.click(checkboxes[0]);
 
     const importBtn = screen.getByText(/Import \d+ records/);
     await act(async () => {
@@ -423,6 +423,189 @@ describe('HomePage', () => {
       expect(screen.getByText('Step 5: Results')).toBeInTheDocument();
     });
     expect(screen.getByText('(dry run)')).toBeInTheDocument();
+  });
+
+  // ── rollback on failure ────────────────────────────────────────────────────
+
+  test('shows rollback checkbox in Step 4', async () => {
+    render(<HomePage />);
+    await waitFor(() => {
+      expect(screen.getByText('Article (api::article.article)')).toBeInTheDocument();
+    });
+
+    const select = screen.getAllByRole('combobox')[0];
+    fireEvent.change(select, { target: { value: 'api::article.article' } });
+
+    await simulateFileUpload();
+
+    await waitFor(() => {
+      expect(screen.getByText('Step 4: Run import')).toBeInTheDocument();
+    });
+
+    expect(screen.getByText('Rollback on failure (undo creates if any row fails)')).toBeInTheDocument();
+    const checkboxes = screen.getAllByRole('checkbox');
+    expect(checkboxes).toHaveLength(2);
+    expect(checkboxes[1]).not.toBeChecked();
+  });
+
+  test('rollback checkbox can be toggled', async () => {
+    render(<HomePage />);
+    await waitFor(() => {
+      expect(screen.getByText('Article (api::article.article)')).toBeInTheDocument();
+    });
+
+    const select = screen.getAllByRole('combobox')[0];
+    fireEvent.change(select, { target: { value: 'api::article.article' } });
+
+    await simulateFileUpload();
+
+    await waitFor(() => {
+      expect(screen.getByText('Step 4: Run import')).toBeInTheDocument();
+    });
+
+    const checkboxes = screen.getAllByRole('checkbox');
+    fireEvent.click(checkboxes[1]);
+    expect(checkboxes[1]).toBeChecked();
+  });
+
+  test('passes rollbackOnFailure=true to the API when rollback checkbox is checked', async () => {
+    render(<HomePage />);
+    await waitFor(() => {
+      expect(screen.getByText('Article (api::article.article)')).toBeInTheDocument();
+    });
+
+    const select = screen.getAllByRole('combobox')[0];
+    fireEvent.change(select, { target: { value: 'api::article.article' } });
+
+    await simulateFileUpload();
+
+    await waitFor(() => {
+      expect(screen.getByText('Step 4: Run import')).toBeInTheDocument();
+    });
+
+    const checkboxes = screen.getAllByRole('checkbox');
+    fireEvent.click(checkboxes[1]);
+
+    const importBtn = screen.getByText(/Import \d+ records/);
+    await act(async () => {
+      fireEvent.click(importBtn);
+    });
+
+    await waitFor(() => {
+      expect(mockPost).toHaveBeenCalledWith('/data-importer/import', expect.objectContaining({ rollbackOnFailure: true }));
+    });
+  });
+
+  test('reset button clears rollback checkbox', async () => {
+    render(<HomePage />);
+    await waitFor(() => {
+      expect(screen.getByText('Article (api::article.article)')).toBeInTheDocument();
+    });
+
+    const select = screen.getAllByRole('combobox')[0];
+    fireEvent.change(select, { target: { value: 'api::article.article' } });
+
+    await simulateFileUpload();
+
+    await waitFor(() => {
+      expect(screen.getByText('Step 4: Run import')).toBeInTheDocument();
+    });
+
+    const checkboxes = screen.getAllByRole('checkbox');
+    fireEvent.click(checkboxes[1]);
+    expect(checkboxes[1]).toBeChecked();
+
+    const resetBtn = screen.getByText('Reset');
+    fireEvent.click(resetBtn);
+
+    // After reset, Step 4 disappears (no CSV loaded)
+    expect(screen.queryByText('Step 4: Run import')).not.toBeInTheDocument();
+  });
+
+  // ── failed rows table (Feature 7) ─────────────────────────────────────────
+
+  test('shows failed rows table when there are errors and failed rows', async () => {
+    mockPost.mockResolvedValue({
+      data: {
+        data: {
+          success: 1,
+          updated: 0,
+          failed: 1,
+          errors: ['Row 3: invalid value'],
+          failedRows: [{ title: 'Bad', body: 'Data' }],
+        },
+      },
+    });
+
+    render(<HomePage />);
+    await waitFor(() => {
+      expect(screen.getByText('Article (api::article.article)')).toBeInTheDocument();
+    });
+
+    const select = screen.getAllByRole('combobox')[0];
+    fireEvent.change(select, { target: { value: 'api::article.article' } });
+
+    await simulateFileUpload();
+
+    await waitFor(() => {
+      expect(screen.getByText('Step 4: Run import')).toBeInTheDocument();
+    });
+
+    const importBtn = screen.getByText(/Import \d+ records/);
+    await act(async () => {
+      fireEvent.click(importBtn);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Step 5: Results')).toBeInTheDocument();
+    });
+
+    expect(screen.getByText('Failed row details:')).toBeInTheDocument();
+    expect(screen.getByText('Row 3: invalid value')).toBeInTheDocument();
+    // CSV column headers should appear in the table header
+    expect(screen.getByText('Bad')).toBeInTheDocument();
+  });
+
+  test('shows extra errors as list when errors exceed failedRows length', async () => {
+    mockPost.mockResolvedValue({
+      data: {
+        data: {
+          success: 0,
+          updated: 0,
+          failed: 2,
+          errors: ['Rolled back 1 record(s) due to errors.', 'Row 3: DB error'],
+          failedRows: [{ title: 'Bad', body: 'Data' }],
+        },
+      },
+    });
+
+    render(<HomePage />);
+    await waitFor(() => {
+      expect(screen.getByText('Article (api::article.article)')).toBeInTheDocument();
+    });
+
+    const select = screen.getAllByRole('combobox')[0];
+    fireEvent.change(select, { target: { value: 'api::article.article' } });
+
+    await simulateFileUpload();
+
+    await waitFor(() => {
+      expect(screen.getByText('Step 4: Run import')).toBeInTheDocument();
+    });
+
+    const importBtn = screen.getByText(/Import \d+ records/);
+    await act(async () => {
+      fireEvent.click(importBtn);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Step 5: Results')).toBeInTheDocument();
+    });
+
+    // Table shows first error (matching failedRows count = 1)
+    expect(screen.getByText('Rolled back 1 record(s) due to errors.')).toBeInTheDocument();
+    // Extra error shown as list item
+    expect(screen.getByText('Row 3: DB error')).toBeInTheDocument();
   });
 
   // ── retry failed rows ──────────────────────────────────────────────────────
