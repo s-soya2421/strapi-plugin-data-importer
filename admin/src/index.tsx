@@ -1,11 +1,22 @@
 import { PLUGIN_ID } from './pluginId';
 import PluginIcon from './components/PluginIcon';
 
+const PERMISSIONS = {
+  read: [{ action: `plugin::${PLUGIN_ID}.read`, subject: null }],
+};
+
+const prefixTranslations = (data: Record<string, string>) =>
+  Object.keys(data).reduce((acc, key) => {
+    acc[`${PLUGIN_ID}.${key}`] = data[key];
+    return acc;
+  }, {} as Record<string, string>);
+
 export default {
   register(app: any) {
     app.addMenuLink({
       to: `/plugins/${PLUGIN_ID}`,
       icon: PluginIcon,
+      permissions: PERMISSIONS.read,
       intlLabel: {
         id: `${PLUGIN_ID}.plugin.name`,
         defaultMessage: 'Data Importer',
@@ -27,7 +38,7 @@ export default {
       locales.map(async (locale) => {
         try {
           const { default: data } = await import(`./translations/${locale}.json`);
-          return { data, locale };
+          return { data: prefixTranslations(data), locale };
         } catch {
           return { data: {}, locale };
         }

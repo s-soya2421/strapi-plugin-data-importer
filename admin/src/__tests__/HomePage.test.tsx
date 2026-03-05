@@ -51,6 +51,30 @@ jest.mock('../utils/parseJSON', () => ({
 global.URL.createObjectURL = jest.fn(() => 'blob:mock');
 global.URL.revokeObjectURL = jest.fn();
 
+const originalConsoleError = console.error;
+let consoleErrorSpy: jest.SpyInstance;
+let anchorClickSpy: jest.SpyInstance;
+
+beforeAll(() => {
+  consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+    const message = args.map((arg) => String(arg ?? '')).join(' ');
+    if (
+      message.includes('not wrapped in act') ||
+      message.includes('Error: Not implemented: navigation (except hash changes)')
+    ) {
+      return;
+    }
+    originalConsoleError(...(args as []));
+  });
+
+  anchorClickSpy = jest.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+});
+
+afterAll(() => {
+  consoleErrorSpy.mockRestore();
+  anchorClickSpy.mockRestore();
+});
+
 // ── Test data ──────────────────────────────────────────────────────────────
 
 const mockContentTypes = [
@@ -58,7 +82,7 @@ const mockContentTypes = [
     uid: 'api::article.article',
     displayName: 'Article',
     fields: [
-      { name: 'title', type: 'string', required: true },
+      { name: 'title', type: 'string', required: true, unique: true },
       { name: 'body', type: 'text' },
     ],
   },
@@ -912,6 +936,86 @@ describe('HomePage', () => {
     expect(mockPost).toHaveBeenCalledWith('/data-importer/import', expect.any(Object));
   });
 
+  test('shows a clear error when JSON parse fails', async () => {
+    const { parseJSON } = require('../utils/parseJSON');
+    parseJSON.mockReturnValueOnce({ headers: [], rows: [], error: 'Invalid JSON syntax.' });
+
+    render(<HomePage />);
+    await waitFor(() => {
+      expect(screen.getByText('Article (api::article.article)')).toBeInTheDocument();
+    });
+
+    const select = screen.getAllByRole('combobox')[0];
+    fireEvent.change(select, { target: { value: 'api::article.article' } });
+
+    const radios = screen.getAllByRole('radio');
+    fireEvent.click(radios[1]); // JSON
+
+    let readerInstance: any;
+    global.FileReader = jest.fn(function (this: any) {
+      readerInstance = this;
+      this.readAsText = jest.fn(() => {
+        Promise.resolve().then(() => {
+          readerInstance.onload?.({ target: { result: '{invalid json' } });
+        });
+      });
+    }) as any;
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File(['{invalid json'], 'data.json', { type: 'application/json' });
+    await act(async () => {
+      fireEvent.change(fileInput, { target: { files: [file] } });
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText('Invalid JSON file: Invalid JSON syntax.')).toBeInTheDocument();
+  });
+
+  test('shows an error when duplicate field mappings are detected before import', async () => {
+    const { parseCSV } = require('../utils/parseCSV');
+    parseCSV.mockReturnValueOnce({
+      headers: ['colA', 'colB'],
+      rows: [{ colA: 'foo', colB: 'bar' }],
+    });
+
+    mockGet.mockImplementation((url: string) => {
+      if (url === '/data-importer/content-types') {
+        return Promise.resolve({ data: { data: mockContentTypes } });
+      }
+      if (url === '/data-importer/mappings') {
+        return Promise.resolve({
+          data: { data: { 'api::article.article': { colA: 'title', colB: 'title' } } },
+        });
+      }
+      if (url === '/data-importer/history') {
+        return Promise.resolve({ data: { data: [] } });
+      }
+      return Promise.resolve({ data: { data: null } });
+    });
+
+    render(<HomePage />);
+    await waitFor(() => {
+      expect(screen.getByText('Article (api::article.article)')).toBeInTheDocument();
+    });
+
+    const select = screen.getAllByRole('combobox')[0];
+    fireEvent.change(select, { target: { value: 'api::article.article' } });
+
+    await simulateFileUpload('colA,colB\nfoo,bar');
+
+    const importBtn = screen.getByText(/Import \d+ records/);
+    await act(async () => {
+      fireEvent.click(importBtn);
+    });
+
+    expect(
+      screen.getByText(
+        'The following Strapi fields are mapped more than once: title. Each field can only be mapped once.'
+      )
+    ).toBeInTheDocument();
+    expect(mockPost).not.toHaveBeenCalled();
+  });
+
   // ── Reset ─────────────────────────────────────────────────────────────────
 
   test('reset button hides Steps 3–5 and clears CSV state', async () => {
@@ -996,6 +1100,46 @@ describe('HomePage', () => {
 
     expect(screen.getByText('Key field:')).toBeInTheDocument();
     expect(screen.getByText('-- Select key field --')).toBeInTheDocument();
+  });
+
+  test('shows warning when no unique fields are available for upsert key', async () => {
+    mockGet.mockImplementation((url: string) => {
+      if (url === '/data-importer/content-types') {
+        return Promise.resolve({ data: { data: mockContentTypesWithRelationMedia } });
+      }
+      if (url === '/data-importer/mappings') {
+        return Promise.resolve({ data: { data: {} } });
+      }
+      if (url === '/data-importer/history') {
+        return Promise.resolve({ data: { data: [] } });
+      }
+      return Promise.resolve({ data: { data: null } });
+    });
+
+    const { parseCSV } = require('../utils/parseCSV');
+    parseCSV.mockReturnValue({
+      headers: ['title'],
+      rows: [{ title: 'Hello' }],
+    });
+
+    render(<HomePage />);
+    await waitFor(() => {
+      expect(screen.getByText('Post (api::post.post)')).toBeInTheDocument();
+    });
+
+    const select = screen.getAllByRole('combobox')[0];
+    fireEvent.change(select, { target: { value: 'api::post.post' } });
+
+    await simulateFileUpload('title\nHello');
+
+    await waitFor(() => {
+      expect(screen.getByText('Import mode:')).toBeInTheDocument();
+    });
+
+    const upsertRadio = screen.getByDisplayValue('upsert');
+    fireEvent.click(upsertRadio);
+
+    expect(screen.getByText('No unique fields are available for upsert key selection.')).toBeInTheDocument();
   });
 
   test('passes importMode and keyField to the API', async () => {

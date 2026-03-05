@@ -26,6 +26,20 @@ describe('parseJSON', () => {
       expect(rows).toHaveLength(1);
       expect(rows[0]).toEqual({ title: 'Hello', body: 'World' });
     });
+
+    test('2件目以降で出現するキーもヘッダーに含める', () => {
+      const json = JSON.stringify([
+        { title: 'Hello' },
+        { title: 'World', body: 'Body text', views: 10 },
+      ]);
+      const { headers, rows } = parseJSON(json);
+
+      expect(headers).toEqual(['title', 'body', 'views']);
+      expect(rows).toEqual([
+        { title: 'Hello', body: '', views: '' },
+        { title: 'World', body: 'Body text', views: '10' },
+      ]);
+    });
   });
 
   // ──────────────────────────────
@@ -59,6 +73,12 @@ describe('parseJSON', () => {
       expect(headers).toEqual([]);
       expect(rows).toHaveLength(0);
     });
+
+    test('不正な JSON を渡すとエラー情報を返す', () => {
+      const result = parseJSON('{invalid json');
+
+      expect(result.error).toMatch(/Invalid JSON syntax/i);
+    });
   });
 
   // ──────────────────────────────
@@ -72,6 +92,12 @@ describe('parseJSON', () => {
       expect(rows).toHaveLength(0);
     });
 
+    test('配列以外の JSON を渡すとエラー情報を返す', () => {
+      const result = parseJSON('{"name": "Alice"}');
+
+      expect(result.error).toMatch(/JSON root must be an array/i);
+    });
+
     test('文字列を渡すと空の結果を返す', () => {
       const { headers, rows } = parseJSON('"hello"');
 
@@ -81,6 +107,13 @@ describe('parseJSON', () => {
 
     test('数値を渡すと空の結果を返す', () => {
       const { headers, rows } = parseJSON('42');
+
+      expect(headers).toEqual([]);
+      expect(rows).toHaveLength(0);
+    });
+
+    test('配列内にオブジェクト以外の値しかない場合は空の結果を返す', () => {
+      const { headers, rows } = parseJSON('[1, "hello", true]');
 
       expect(headers).toEqual([]);
       expect(rows).toHaveLength(0);

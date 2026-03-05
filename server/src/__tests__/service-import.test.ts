@@ -138,7 +138,7 @@ describe('importService.getContentTypes()', () => {
         name: { type: 'string' },
         startDate: { type: 'date' },
         startTime: { type: 'time' },
-        createdAt: { type: 'datetime' },
+        eventAt: { type: 'datetime' },
       }),
     });
 
@@ -149,7 +149,35 @@ describe('importService.getContentTypes()', () => {
     expect(fields).toContain('name');
     expect(fields).toContain('startDate');
     expect(fields).toContain('startTime');
-    expect(fields).toContain('createdAt');
+    expect(fields).toContain('eventAt');
+  });
+
+  test('システムフィールドは除外される', async () => {
+    const strapi = buildStrapi({
+      'api::post.post': buildContentType({
+        title: { type: 'string' },
+        createdAt: { type: 'datetime' },
+        updatedAt: { type: 'datetime' },
+        publishedAt: { type: 'datetime' },
+        createdBy: { type: 'relation', relationType: 'oneToOne' },
+        updatedBy: { type: 'relation', relationType: 'oneToOne' },
+        locale: { type: 'string' },
+        localizations: { type: 'relation', relationType: 'oneToMany' },
+      }),
+    });
+
+    const service = importServiceFactory({ strapi });
+    const result = await service.getContentTypes();
+
+    const fields = result[0].fields.map((f: any) => f.name);
+    expect(fields).toContain('title');
+    expect(fields).not.toContain('createdAt');
+    expect(fields).not.toContain('updatedAt');
+    expect(fields).not.toContain('publishedAt');
+    expect(fields).not.toContain('createdBy');
+    expect(fields).not.toContain('updatedBy');
+    expect(fields).not.toContain('locale');
+    expect(fields).not.toContain('localizations');
   });
 
   test('required=true のフィールドに required プロパティが付与される', async () => {
@@ -167,6 +195,23 @@ describe('importService.getContentTypes()', () => {
     const bodyField = result[0].fields.find((f: any) => f.name === 'body');
     expect(titleField?.required).toBe(true);
     expect(bodyField?.required).toBeUndefined();
+  });
+
+  test('unique=true のフィールドに unique プロパティが付与される', async () => {
+    const strapi = buildStrapi({
+      'api::post.post': buildContentType({
+        slug: { type: 'string', unique: true },
+        title: { type: 'string' },
+      }),
+    });
+
+    const service = importServiceFactory({ strapi });
+    const result = await service.getContentTypes();
+
+    const slugField = result[0].fields.find((f: any) => f.name === 'slug');
+    const titleField = result[0].fields.find((f: any) => f.name === 'title');
+    expect(slugField?.unique).toBe(true);
+    expect(titleField?.unique).toBeUndefined();
   });
 
   test('info.displayName がない場合は uid をフォールバックとして使う', async () => {
@@ -196,13 +241,48 @@ describe('importService.importRecords()', () => {
   const uid = 'api::article.article';
 
   const attributes = {
-    title: { type: 'string' },
+    title: { type: 'string', unique: true },
     score: { type: 'integer' },
     price: { type: 'decimal' },
     published: { type: 'boolean' },
     views: { type: 'biginteger' },
     ratio: { type: 'float' },
   };
+
+  // ──────────────────────────
+  // 入力バリデーション
+  // ──────────────────────────
+  describe('入力バリデーション', () => {
+    test('fieldMapping で同一フィールドに重複マッピングがある場合はエラーを投げる', async () => {
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn);
+      const service = importServiceFactory({ strapi });
+
+      await expect(
+        service.importRecords(
+          uid,
+          [{ col_a: 'A', col_b: 'B' }],
+          { col_a: 'title', col_b: 'title' }
+        )
+      ).rejects.toThrow(/fieldMapping maps multiple columns to the same field: title/i);
+      expect(createFn).not.toHaveBeenCalled();
+    });
+
+    test('fieldMapping に文字列以外の値がある場合はエラーを投げる', async () => {
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn);
+      const service = importServiceFactory({ strapi });
+
+      await expect(
+        service.importRecords(
+          uid,
+          [{ col_a: 'A' }],
+          { col_a: 123 as unknown as string }
+        )
+      ).rejects.toThrow(/fieldMapping values must be strings/i);
+      expect(createFn).not.toHaveBeenCalled();
+    });
+  });
 
   // ──────────────────────────
   // 型変換
@@ -413,14 +493,28 @@ describe('importService.importRecords()', () => {
     test('datetime フィールドを ISO 形式の現在日時で補完する', async () => {
       const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
       const strapi = buildStrapi({
-        [uid]: buildContentType({ title: { type: 'string' }, createdAt: { type: 'datetime' } }),
+        [uid]: buildContentType({ title: { type: 'string' }, eventAt: { type: 'datetime' } }),
       }, createFn);
       const service = importServiceFactory({ strapi });
 
       await service.importRecords(uid, [{ col_title: 'Hello' }], { col_title: 'title' });
 
       expect(createFn).toHaveBeenCalledWith({
-        data: { title: 'Hello', createdAt: fakeNow.toISOString() },
+        data: { title: 'Hello', eventAt: fakeNow.toISOString() },
+      });
+    });
+
+    test('システムフィールド(publishedAt)は自動補完しない', async () => {
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const strapi = buildStrapi({
+        [uid]: buildContentType({ title: { type: 'string' }, publishedAt: { type: 'datetime' } }),
+      }, createFn);
+      const service = importServiceFactory({ strapi });
+
+      await service.importRecords(uid, [{ col_title: 'Hello' }], { col_title: 'title' });
+
+      expect(createFn).toHaveBeenCalledWith({
+        data: { title: 'Hello' },
       });
     });
 
@@ -788,6 +882,19 @@ describe('importService.importRecords()', () => {
       expect(result.errors[0]).toMatch(/ratio/);
     });
 
+    test('decimal フィールドに部分一致の数値文字列を渡すと失敗する', async () => {
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn);
+      const service = importServiceFactory({ strapi });
+
+      const result = await service.importRecords(uid, [{ col_price: '12abc' }], { col_price: 'price' });
+
+      expect(result.failed).toBe(1);
+      expect(result.errors[0]).toMatch(/price/);
+      expect(result.errors[0]).toMatch(/number/);
+      expect(createFn).not.toHaveBeenCalled();
+    });
+
     test('boolean フィールドに "yes" を渡すと失敗する', async () => {
       const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
       const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn);
@@ -962,6 +1069,20 @@ describe('importService.importRecords()', () => {
       expect(result.success).toBe(1);
       expect(createFn).toHaveBeenCalledTimes(1);
     });
+
+    test('required フィールドが未マッピングの場合も失敗する', async () => {
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const attrs = { title: { type: 'string', required: true }, body: { type: 'text' } };
+      const strapi = buildStrapi({ [uid]: buildContentType(attrs) }, createFn);
+      const service = importServiceFactory({ strapi });
+
+      const result = await service.importRecords(uid, [{ col_body: 'Hello' }], { col_body: 'body' }, true);
+
+      expect(createFn).not.toHaveBeenCalled();
+      expect(result.failed).toBe(1);
+      expect(result.errors[0]).toMatch(/title/);
+      expect(result.errors[0]).toMatch(/required/);
+    });
   });
 
   // ──────────────────────────
@@ -988,7 +1109,9 @@ describe('importService.importRecords()', () => {
       expect(result.success).toBe(0);
       expect(result.failed).toBe(2);
       expect(result.failedRows).toHaveLength(2);
-      expect(result.errors[0]).toMatch(/Rolled back 1 record/);
+      expect(result.errors[0]).toMatch(/Row 3: DB error/);
+      expect(result.errors[1]).toMatch(/Rolled back: this row was created earlier/);
+      expect(result.errors.some((e) => e.includes('Rolled back 1 record(s) due to errors.'))).toBe(true);
     });
 
     test('rollbackOnFailure=true で成功行が failedRows に追加される', async () => {
@@ -1074,7 +1197,7 @@ describe('importService.importRecords()', () => {
       expect(result.errors.some((e) => e.includes('Rolled back'))).toBe(false);
     });
 
-    test('ロールバック後は success=0, updated=0 になる', async () => {
+    test('ロールバック後も updated は保持される（更新は巻き戻せない）', async () => {
       const deleteFn = jest.fn().mockResolvedValue({});
       // Row A finds existing → update; Row B finds nothing → create (which fails)
       const findManyFn = jest.fn()
@@ -1089,7 +1212,7 @@ describe('importService.importRecords()', () => {
       });
       const service = importServiceFactory({ strapi });
 
-      // Row A: upsert-update (updated++), Row B: create fails → rollback resets updated=0
+      // Row A: upsert-update (updated++), Row B: create fails → created rows only rollback
       const result = await service.importRecords(
         uid,
         [{ col_title: 'existing' }, { col_title: 'new-fail' }],
@@ -1099,7 +1222,8 @@ describe('importService.importRecords()', () => {
       );
 
       expect(result.success).toBe(0);
-      expect(result.updated).toBe(0);
+      expect(result.updated).toBe(1);
+      expect(result.errors.some((e) => e.includes('Rolled back'))).toBe(false);
     });
   });
 
@@ -1158,7 +1282,74 @@ describe('importService.importRecords()', () => {
       expect(result.updated).toBe(0);
     });
 
-    test('keyField が指定されていない場合は通常 create を呼ぶ', async () => {
+    test('keyField が指定されていない場合はエラーを投げる', async () => {
+      const findManyFn = jest.fn();
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn, {
+        findMany: findManyFn,
+      });
+      const service = importServiceFactory({ strapi });
+
+      await expect(service.importRecords(
+        uid,
+        [{ col_title: 'Hello' }],
+        { col_title: 'title' },
+        false,
+        0,
+        'upsert'
+      )).rejects.toThrow(/keyField is required/i);
+      expect(findManyFn).not.toHaveBeenCalled();
+      expect(createFn).not.toHaveBeenCalled();
+    });
+
+    test('keyField がマッピングされていない場合はエラーを投げる', async () => {
+      const findManyFn = jest.fn();
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const strapi = buildStrapi({
+        [uid]: buildContentType({
+          ...attributes,
+          externalId: { type: 'string', unique: true },
+        }),
+      }, createFn, {
+        findMany: findManyFn,
+      });
+      const service = importServiceFactory({ strapi });
+
+      await expect(service.importRecords(
+        uid,
+        [{ col_title: 'Hello' }],
+        { col_title: 'title' },
+        false,
+        0,
+        'upsert',
+        'externalId'
+      )).rejects.toThrow(/must be mapped/i);
+      expect(findManyFn).not.toHaveBeenCalled();
+      expect(createFn).not.toHaveBeenCalled();
+    });
+
+    test('keyField が unique でない場合はエラーを投げる', async () => {
+      const findManyFn = jest.fn();
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn, {
+        findMany: findManyFn,
+      });
+      const service = importServiceFactory({ strapi });
+
+      await expect(service.importRecords(
+        uid,
+        [{ col_score: '10' }],
+        { col_score: 'score' },
+        false,
+        0,
+        'upsert',
+        'score'
+      )).rejects.toThrow(/must be unique/i);
+      expect(findManyFn).not.toHaveBeenCalled();
+      expect(createFn).not.toHaveBeenCalled();
+    });
+
+    test('upsert で keyField の値が空行は失敗し create されない', async () => {
       const findManyFn = jest.fn();
       const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
       const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn, {
@@ -1168,17 +1359,19 @@ describe('importService.importRecords()', () => {
 
       const result = await service.importRecords(
         uid,
-        [{ col_title: 'Hello' }],
+        [{ col_title: '' }],
         { col_title: 'title' },
         false,
         0,
-        'upsert'
-        // keyField は未指定
+        'upsert',
+        'title'
       );
 
+      expect(result.success).toBe(0);
+      expect(result.failed).toBe(1);
+      expect(result.errors[0]).toMatch(/key field 'title' is required/i);
       expect(findManyFn).not.toHaveBeenCalled();
-      expect(createFn).toHaveBeenCalled();
-      expect(result.success).toBe(1);
+      expect(createFn).not.toHaveBeenCalled();
     });
 
     test('importMode=create では findMany を呼ばない', async () => {
@@ -1202,6 +1395,33 @@ describe('importService.importRecords()', () => {
       expect(findManyFn).not.toHaveBeenCalled();
     });
 
+    test('upsert で key の一致レコードが複数ある場合は失敗にする', async () => {
+      const findManyFn = jest.fn().mockResolvedValue([{ documentId: 'a' }, { documentId: 'b' }]);
+      const updateFn = jest.fn();
+      const createFn = jest.fn();
+      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn, {
+        findMany: findManyFn,
+        update: updateFn,
+      });
+      const service = importServiceFactory({ strapi });
+
+      const result = await service.importRecords(
+        uid,
+        [{ col_title: 'dup' }],
+        { col_title: 'title' },
+        false,
+        0,
+        'upsert',
+        'title'
+      );
+
+      expect(result.success).toBe(0);
+      expect(result.failed).toBe(1);
+      expect(result.errors[0]).toMatch(/multiple records matched key field 'title'/i);
+      expect(updateFn).not.toHaveBeenCalled();
+      expect(createFn).not.toHaveBeenCalled();
+    });
+
     test('戻り値に updated フィールドが含まれる', async () => {
       const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
       const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn);
@@ -1211,6 +1431,145 @@ describe('importService.importRecords()', () => {
 
       expect(result).toHaveProperty('updated');
       expect(result.updated).toBe(0);
+    });
+  });
+
+  describe('チャンク実行 (runId)', () => {
+    test('runId 指定時は結果を累積し最終チャンクで履歴を1件だけ保存する', async () => {
+      (fs.readFileSync as jest.Mock).mockImplementation(() => { throw new Error('ENOENT'); });
+      const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn);
+      const service = importServiceFactory({ strapi });
+
+      const first = await service.importRecords(
+        uid,
+        [{ col_title: 'A' }],
+        { col_title: 'title' },
+        false,
+        0,
+        'create',
+        undefined,
+        false,
+        'run-1',
+        false,
+        2
+      );
+      expect(first.success).toBe(1);
+      expect(first.completed).toBe(false);
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
+
+      const second = await service.importRecords(
+        uid,
+        [{ col_title: 'B' }],
+        { col_title: 'title' },
+        false,
+        1,
+        'create',
+        undefined,
+        false,
+        'run-1',
+        true,
+        2
+      );
+      expect(second.success).toBe(2);
+      expect(second.completed).toBe(true);
+      expect(fs.writeFileSync).toHaveBeenCalledTimes(1);
+
+      const historyJson = (fs.writeFileSync as jest.Mock).mock.calls[0][1];
+      const history = JSON.parse(historyJson);
+      expect(history[0].success).toBe(2);
+      expect(history[0].totalRows).toBe(2);
+    });
+
+    test('runId 指定 + rollbackOnFailure で後続チャンク失敗時に前チャンク作成分も削除する', async () => {
+      (fs.readFileSync as jest.Mock).mockImplementation(() => { throw new Error('ENOENT'); });
+      const deleteFn = jest.fn().mockResolvedValue({});
+      const createFn = jest.fn()
+        .mockResolvedValueOnce({ documentId: 'doc-1' })
+        .mockRejectedValueOnce(new Error('DB error'));
+      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn, { delete: deleteFn });
+      const service = importServiceFactory({ strapi });
+
+      await service.importRecords(
+        uid,
+        [{ col_title: 'A' }],
+        { col_title: 'title' },
+        false,
+        0,
+        'create',
+        undefined,
+        true,
+        'run-2',
+        false,
+        2
+      );
+
+      const second = await service.importRecords(
+        uid,
+        [{ col_title: 'B' }],
+        { col_title: 'title' },
+        false,
+        1,
+        'create',
+        undefined,
+        true,
+        'run-2',
+        false,
+        2
+      );
+
+      expect(deleteFn).toHaveBeenCalledWith({ documentId: 'doc-1' });
+      expect(second.success).toBe(0);
+      expect(second.failed).toBe(2);
+      expect(second.rollbackApplied).toBe(true);
+      expect(second.completed).toBe(true);
+      expect(fs.writeFileSync).toHaveBeenCalledTimes(1);
+    });
+
+    test('古い runId 状態は TTL 超過で自動削除される', async () => {
+      jest.useFakeTimers();
+      try {
+        (fs.readFileSync as jest.Mock).mockImplementation(() => { throw new Error('ENOENT'); });
+        const findManyFn = jest.fn().mockResolvedValue([]);
+        const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
+        const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn, { findMany: findManyFn });
+        const service = importServiceFactory({ strapi });
+
+        await service.importRecords(
+          uid,
+          [{ col_title: 'A' }],
+          { col_title: 'title' },
+          false,
+          0,
+          'create',
+          undefined,
+          false,
+          'stale-run',
+          false,
+          1
+        );
+
+        jest.advanceTimersByTime(30 * 60 * 1000 + 1);
+
+        const result = await service.importRecords(
+          uid,
+          [{ col_title: 'B' }],
+          { col_title: 'title' },
+          false,
+          0,
+          'upsert',
+          'title',
+          false,
+          'stale-run',
+          true,
+          1
+        );
+
+        expect(result.failed).toBe(0);
+        expect(result.completed).toBe(true);
+      } finally {
+        jest.useRealTimers();
+      }
     });
   });
 });
