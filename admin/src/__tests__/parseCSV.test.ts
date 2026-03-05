@@ -36,6 +36,14 @@ describe('parseCSV', () => {
       expect(headers).toEqual([]);
       expect(rows).toHaveLength(0);
     });
+
+    test('UTF-8 BOM 付きCSVでも先頭ヘッダーを正しくパースする', () => {
+      const csv = '\uFEFFname,age\nAlice,30';
+      const { headers, rows } = parseCSV(csv);
+
+      expect(headers).toEqual(['name', 'age']);
+      expect(rows[0]).toEqual({ name: 'Alice', age: '30' });
+    });
   });
 
   // ──────────────────────────────
@@ -85,11 +93,10 @@ describe('parseCSV', () => {
     });
 
     test('クォート内の改行を含むフィールドはそのまま取得できる', () => {
-      // 簡易パーサーのため複数行フィールドは範囲外だが、単行内のクォートは問題なし
-      const csv = 'a,b\n"foo","bar"';
+      const csv = 'a,b\n"line1\nline2","bar"';
       const { rows } = parseCSV(csv);
 
-      expect(rows[0]).toEqual({ a: 'foo', b: 'bar' });
+      expect(rows[0]).toEqual({ a: 'line1\nline2', b: 'bar' });
     });
   });
 

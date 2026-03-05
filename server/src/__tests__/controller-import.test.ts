@@ -129,6 +129,49 @@ describe('importController.importRecords()', () => {
     expect(ctx.badRequest).toHaveBeenCalled();
   });
 
+  test('fieldMapping がオブジェクトでない場合は badRequest を返す', async () => {
+    const importRecordsMock = jest.fn();
+    const strapi = buildStrapi({ importRecords: importRecordsMock });
+    const controller = importControllerFactory({ strapi });
+    const ctx = buildCtx({ uid: 'api::article.article', rows: [], fieldMapping: [] });
+    await controller.importRecords(ctx);
+
+    expect(ctx.badRequest).toHaveBeenCalledWith('fieldMapping must be an object');
+    expect(importRecordsMock).not.toHaveBeenCalled();
+  });
+
+  test('fieldMapping の値が文字列以外を含む場合は badRequest を返す', async () => {
+    const importRecordsMock = jest.fn();
+    const strapi = buildStrapi({ importRecords: importRecordsMock });
+    const controller = importControllerFactory({ strapi });
+    const ctx = buildCtx({
+      uid: 'api::article.article',
+      rows: [{ col_title: 'Hello' }],
+      fieldMapping: { col_title: 123 },
+    });
+    await controller.importRecords(ctx);
+
+    expect(ctx.badRequest).toHaveBeenCalledWith('fieldMapping values must be strings');
+    expect(importRecordsMock).not.toHaveBeenCalled();
+  });
+
+  test('fieldMapping で同一フィールドへの重複マッピングがある場合は badRequest を返す', async () => {
+    const importRecordsMock = jest.fn();
+    const strapi = buildStrapi({ importRecords: importRecordsMock });
+    const controller = importControllerFactory({ strapi });
+    const ctx = buildCtx({
+      uid: 'api::article.article',
+      rows: [{ col_a: 'A', col_b: 'B' }],
+      fieldMapping: { col_a: 'title', col_b: 'title' },
+    });
+    await controller.importRecords(ctx);
+
+    expect(ctx.badRequest).toHaveBeenCalledWith(
+      'fieldMapping maps multiple columns to the same field: title'
+    );
+    expect(importRecordsMock).not.toHaveBeenCalled();
+  });
+
   test('rows が空配列でも正常に処理する', async () => {
     const importResult = { success: 0, failed: 0, errors: [], failedRows: [] };
     const strapi = buildStrapi({
@@ -239,6 +282,35 @@ describe('importController.importRecords()', () => {
       'create',
       undefined,
       true
+    );
+  });
+
+  test('runId/isFinalChunk/totalRows が指定されている場合は追加引数として渡る', async () => {
+    const importRecordsMock = jest.fn().mockResolvedValue({ success: 2, updated: 0, failed: 0, errors: [], failedRows: [], completed: true });
+    const strapi = buildStrapi({ importRecords: importRecordsMock });
+
+    const controller = importControllerFactory({ strapi });
+    const ctx = buildCtx({
+      ...validBody,
+      runId: 'run-1',
+      isFinalChunk: true,
+      totalRows: 20,
+      rollbackOnFailure: false,
+    });
+    await controller.importRecords(ctx);
+
+    expect(importRecordsMock).toHaveBeenCalledWith(
+      validBody.uid,
+      validBody.rows,
+      validBody.fieldMapping,
+      false,
+      0,
+      'create',
+      undefined,
+      false,
+      'run-1',
+      true,
+      20
     );
   });
 

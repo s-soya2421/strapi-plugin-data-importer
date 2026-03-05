@@ -38,3 +38,5 @@ coverage/
 
 # Claude Code
 .claude/
+
+tmp/

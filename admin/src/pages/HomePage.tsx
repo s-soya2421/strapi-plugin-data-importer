@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useIntl } from 'react-intl';
 import { useFetchClient } from '@strapi/admin/strapi-admin';
 import { parseCSV } from '../utils/parseCSV';
@@ -10,6 +10,7 @@ interface FieldInfo {
   relationType?: string;
   multiple?: boolean;
   required?: boolean;
+  unique?: boolean;
 }
 
 interface ContentTypeInfo {
@@ -24,6 +25,8 @@ interface ImportResult {
   failed: number;
   errors: string[];
   failedRows: Record<string, string>[];
+  rollbackApplied?: boolean;
+  completed?: boolean;
 }
 
 interface HistoryEntry {
@@ -39,11 +42,33 @@ interface HistoryEntry {
   totalRows: number;
 }
 
+interface DataResponse<T> {
+  data?: {
+    data?: T;
+  };
+}
+
 // CSVヘッダー → Strapiフィールド名 のマッピング型
 type FieldMapping = Record<string, string>; // { "CSV列名": "strapiField" }
 type AllMappings = Record<string, FieldMapping>; // { "api::uid": { ... } }
 
 const DEFAULT_BATCH_SIZE = 100;
+
+const getErrorMessage = (error: unknown): string => {
+  if (error instanceof Error) return error.message;
+  return String(error);
+};
+
+const findDuplicateMappedFields = (mapping: FieldMapping): string[] => {
+  const counts = new Map<string, number>();
+  for (const mappedField of Object.values(mapping)) {
+    if (!mappedField) continue;
+    counts.set(mappedField, (counts.get(mappedField) ?? 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .filter(([, count]) => count > 1)
+    .map(([field]) => field);
+};
 
 const HomePage = () => {
   const { get, post } = useFetchClient();
@@ -73,20 +98,20 @@ const HomePage = () => {
 
   useEffect(() => {
     get('/data-importer/content-types')
-      .then((res: any) => setContentTypes(res.data?.data ?? []))
-      .catch((err: any) =>
+      .then((res: DataResponse<ContentTypeInfo[]>) => setContentTypes(res.data?.data ?? []))
+      .catch((err: unknown) =>
         setError(
           formatMessage(
             { id: 'data-importer.error.fetchContentTypes', defaultMessage: 'Failed to fetch content types: {message}' },
-            { message: err.message }
+            { message: getErrorMessage(err) }
           )
         )
       );
     get('/data-importer/mappings')
-      .then((res: any) => setAllMappings(res.data?.data ?? {}))
+      .then((res: DataResponse<AllMappings>) => setAllMappings(res.data?.data ?? {}))
       .catch(() => {});
     get('/data-importer/history')
-      .then((res: any) => {
+      .then((res: DataResponse<HistoryEntry[]>) => {
         const data = res.data?.data;
         setHistory(Array.isArray(data) ? data : []);
       })
@@ -94,10 +119,20 @@ const HomePage = () => {
   }, []);
 
   const selectedContentType = contentTypes.find((ct) => ct.uid === selectedUid);
+  const upsertKeyFields = selectedContentType?.fields.filter((f) => f.unique === true) ?? [];
 
   const hasRelationOrMediaFields = selectedContentType?.fields.some(
     (f) => f.type === 'relation' || f.type === 'media'
   ) ?? false;
+
+  const selectedFieldCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const mappedField of Object.values(fieldMapping)) {
+      if (!mappedField) continue;
+      counts.set(mappedField, (counts.get(mappedField) ?? 0) + 1);
+    }
+    return counts;
+  }, [fieldMapping]);
 
   const handleDownloadTemplate = () => {
     if (!selectedContentType) return;
@@ -121,7 +156,27 @@ const HomePage = () => {
     const reader = new FileReader();
     reader.onload = (ev) => {
       const text = ev.target?.result as string;
-      const { headers, rows } = fileFormat === 'json' ? parseJSON(text) : parseCSV(text);
+      const parsed = fileFormat === 'json' ? parseJSON(text) : parseCSV(text);
+      const jsonError =
+        'error' in parsed && typeof parsed.error === 'string' && parsed.error.trim() !== ''
+          ? parsed.error
+          : null;
+      if (jsonError) {
+        setError(
+          formatMessage(
+            { id: 'data-importer.step2.invalidJson', defaultMessage: 'Invalid JSON file: {message}' },
+            { message: jsonError }
+          )
+        );
+        setCsvHeaders([]);
+        setCsvRows([]);
+        setFieldMapping({});
+        setImportResult(null);
+        setFailedRows([]);
+        return;
+      }
+      const { headers, rows } = parsed;
+      setError(null);
       setCsvHeaders(headers);
       setCsvRows(rows);
       const mapping = allMappings[selectedUid] ?? {};
@@ -143,6 +198,68 @@ const HomePage = () => {
 
   const handleImport = async (rowsToImport = csvRows, offset = 0) => {
     if (!selectedUid || rowsToImport.length === 0) return;
+
+    const duplicateMappedFields = findDuplicateMappedFields(fieldMapping);
+    if (duplicateMappedFields.length > 0) {
+      setError(
+        formatMessage(
+          {
+            id: 'data-importer.step3.duplicateMapping',
+            defaultMessage:
+              'The following Strapi fields are mapped more than once: {fields}. Each field can only be mapped once.',
+          },
+          { fields: duplicateMappedFields.join(', ') }
+        )
+      );
+      return;
+    }
+
+    if (importMode === 'upsert') {
+      if (upsertKeyFields.length === 0) {
+        setError(
+          formatMessage({
+            id: 'data-importer.step4.upsertNoUniqueField',
+            defaultMessage: 'Upsert mode requires at least one unique field on the selected content type.',
+          })
+        );
+        return;
+      }
+      if (!keyField) {
+        setError(
+          formatMessage({
+            id: 'data-importer.step4.upsertKeyRequired',
+            defaultMessage: 'Upsert mode requires selecting a key field.',
+          })
+        );
+        return;
+      }
+      const mappedFields = new Set(Object.values(fieldMapping).filter(Boolean));
+      if (!mappedFields.has(keyField)) {
+        setError(
+          formatMessage(
+            {
+              id: 'data-importer.step4.upsertKeyNotMapped',
+              defaultMessage: "Selected key field '{field}' is not mapped to any input column.",
+            },
+            { field: keyField }
+          )
+        );
+        return;
+      }
+      if (!upsertKeyFields.some((field) => field.name === keyField)) {
+        setError(
+          formatMessage(
+            {
+              id: 'data-importer.step4.upsertKeyMustBeUnique',
+              defaultMessage: "Selected key field '{field}' must be unique.",
+            },
+            { field: keyField }
+          )
+        );
+        return;
+      }
+    }
+
     setLoading(true);
     setError(null);
     setImportResult(null);
@@ -156,11 +273,12 @@ const HomePage = () => {
       chunks.push(rowsToImport.slice(i, i + effectiveBatchSize));
     }
 
-    const accumulated: ImportResult = { success: 0, updated: 0, failed: 0, errors: [], failedRows: [] };
+    let accumulated: ImportResult = { success: 0, updated: 0, failed: 0, errors: [], failedRows: [] };
+    const runId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
     try {
       for (let c = 0; c < chunks.length; c++) {
-        const res: any = await post('/data-importer/import', {
+        const res: DataResponse<ImportResult> = await post('/data-importer/import', {
           uid: selectedUid,
           rows: chunks[c],
           fieldMapping,
@@ -169,32 +287,43 @@ const HomePage = () => {
           importMode,
           keyField: importMode === 'upsert' ? keyField : undefined,
           rollbackOnFailure,
+          runId,
+          isFinalChunk: c === chunks.length - 1,
+          totalRows: rowsToImport.length,
         });
         const chunkResult = res.data?.data;
         if (chunkResult) {
-          accumulated.success += chunkResult.success ?? 0;
-          accumulated.updated += chunkResult.updated ?? 0;
-          accumulated.failed += chunkResult.failed ?? 0;
-          accumulated.errors.push(...(chunkResult.errors ?? []));
-          accumulated.failedRows.push(...(chunkResult.failedRows ?? []));
+          accumulated = {
+            success: chunkResult.success ?? 0,
+            updated: chunkResult.updated ?? 0,
+            failed: chunkResult.failed ?? 0,
+            errors: chunkResult.errors ?? [],
+            failedRows: chunkResult.failedRows ?? [],
+            rollbackApplied: chunkResult.rollbackApplied === true,
+            completed: chunkResult.completed === true,
+          };
         }
         setImportProgress(Math.round(((c + 1) / chunks.length) * 100));
         setProgressRows(Math.min((c + 1) * effectiveBatchSize, rowsToImport.length));
+
+        if (accumulated.rollbackApplied) {
+          break;
+        }
       }
       setImportResult(accumulated);
       setFailedRows(accumulated.failedRows);
       // Refresh history after import
       get('/data-importer/history')
-        .then((res: any) => {
+        .then((res: DataResponse<HistoryEntry[]>) => {
           const data = res.data?.data;
           setHistory(Array.isArray(data) ? data : []);
         })
         .catch(() => {});
-    } catch (err: any) {
+    } catch (err: unknown) {
       setError(
         formatMessage(
           { id: 'data-importer.error.importFailed', defaultMessage: 'Import failed: {message}' },
-          { message: err.message ?? String(err) }
+          { message: getErrorMessage(err) }
         )
       );
     } finally {
@@ -422,13 +551,14 @@ const HomePage = () => {
             </thead>
             <tbody>
               {csvHeaders.map((header) => {
-                const isAutoMapped = fieldMapping[header] !== '';
+                const currentMappedField = fieldMapping[header] ?? '';
+                const isAutoMapped = currentMappedField !== '';
                 return (
-                  <tr key={header} style={isAutoMapped ? { background: '#f0fdf4' } : undefined}>
+                  <tr key={header}>
                     <td style={styles.td}>
                       {header}
                       {isAutoMapped && (
-                        <span style={{ marginLeft: '6px', fontSize: '11px', color: '#328048', fontWeight: 600 }}>
+                        <span style={{ marginLeft: '6px', fontSize: '11px', background: '#328048', color: '#fff', fontWeight: 600, padding: '1px 5px', borderRadius: '3px' }}>
                           {formatMessage({ id: 'data-importer.step3.auto', defaultMessage: 'Auto' })}
                         </span>
                       )}
@@ -442,9 +572,19 @@ const HomePage = () => {
                         <option value="">
                           {formatMessage({ id: 'data-importer.step3.skip', defaultMessage: '-- Skip --' })}
                         </option>
-                        {selectedContentType.fields.map((f) => (
-                          <option key={f.name} value={f.name}>{getFieldLabel(f)}</option>
-                        ))}
+                        {selectedContentType.fields.map((f) => {
+                          const alreadyMappedByOtherColumn =
+                            (selectedFieldCounts.get(f.name) ?? 0) > 0 && currentMappedField !== f.name;
+                          return (
+                            <option
+                              key={f.name}
+                              value={f.name}
+                              disabled={alreadyMappedByOtherColumn}
+                            >
+                              {getFieldLabel(f)}
+                            </option>
+                          );
+                        })}
                       </select>
                     </td>
                   </tr>
@@ -534,10 +674,18 @@ const HomePage = () => {
                 <option value="">
                   {formatMessage({ id: 'data-importer.step4.keyFieldPlaceholder', defaultMessage: '-- Select key field --' })}
                 </option>
-                {selectedContentType?.fields.map((f) => (
+                {upsertKeyFields.map((f) => (
                   <option key={f.name} value={f.name}>{getFieldLabel(f)}</option>
                 ))}
               </select>
+              {upsertKeyFields.length === 0 && (
+                <p style={{ fontSize: '12px', color: '#d02b20', marginTop: '8px' }}>
+                  {formatMessage({
+                    id: 'data-importer.step4.upsertNoUniqueFieldHint',
+                    defaultMessage: 'No unique fields are available for upsert key selection.',
+                  })}
+                </p>
+              )}
             </div>
           )}
           <button

@@ -19,6 +19,7 @@ Strapi v5 plugin to import content records from CSV or JSON files via the admin 
 - **Import progress display** — shows a progress bar and row counter during import
 - **Failed rows table** — view failing rows alongside their error messages, with a retry button
 - **Import history** — view the last 50 import runs (created / updated / failed counts)
+- **RBAC support** — separate plugin permissions for read and import execution
 
 ## Requirements
 
@@ -142,7 +143,7 @@ The following fields are validated before import. Rows that fail validation are 
 | Mode | Behavior |
 |---|---|
 | **Create** (default) | Always insert a new record for every row |
-| **Upsert** | Search for an existing record by the selected key field. If found, update it; if not, create a new one |
+| **Upsert** | Search for an existing record by the selected key field. The key field must be marked `unique` in the content type. If one match is found, update it; if none, create a new one. |
 
 ### Dry run
 
@@ -159,6 +160,12 @@ Large files are split into batches before being sent to the server (default: 100
 ## Import history
 
 After each import, a summary entry is saved to `config/data-importer-history.json` (up to 50 entries, newest first). The history table in the UI shows the date/time, content type, mode, and counts for the last 10 runs. Dry-run entries are marked with a checkmark.
+
+## Staging validation runbook
+
+For end-to-end staging checks with real schema/files, large-file performance tests, and backup/restore drills, see:
+
+- `docs/staging-test-runbook.md`
 
 ## License
 
