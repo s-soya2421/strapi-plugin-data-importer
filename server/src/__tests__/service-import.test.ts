@@ -6,9 +6,78 @@ jest.mock('fs');
 // ────────────────────────────
 // Strapi モックヘルパー
 // ────────────────────────────
-function buildStrapi(contentTypes: Record<string, any>, createFn?: jest.Mock, extraDocMethods: Record<string, jest.Mock> = {}) {
+
+function buildPermissionChecker() {
+  return {
+    cannot: {
+      read: () => false,
+      create: () => false,
+      update: () => false,
+    },
+    sanitizeCreateInput: (data: any) => data,
+    sanitizeUpdateInput: (_entity: any) => (data: any) => data,
+    sanitizedQuery: {
+      read: (query: any) => query,
+      update: (query: any) => query,
+    },
+  };
+}
+
+function buildCoreStoreMock(store: Map<string, string>) {
+  return {
+    findOne: jest.fn(async ({ where }: { where: { key: string } }) => {
+      const val = store.get(where.key);
+      return val !== undefined ? { ...where, value: val } : null;
+    }),
+    create: jest.fn(async ({ data }: { data: { key: string; value: string } }) => {
+      store.set(data.key, data.value);
+      return data;
+    }),
+    update: jest.fn(async ({ where, data }: { where: { key: string }; data: { value: string } }) => {
+      store.set(where.key, data.value);
+      return data;
+    }),
+    delete: jest.fn(async ({ where }: { where: { key: string } }) => {
+      store.delete(where.key);
+    }),
+    deleteMany: jest.fn(async ({ where }: { where: { key: string } }) => {
+      store.delete(where.key);
+    }),
+  };
+}
+
+function buildStrapi(
+  contentTypes: Record<string, any>,
+  createFn?: jest.Mock,
+  extraDocMethods: Record<string, jest.Mock> = {},
+  storeMap: Map<string, string> = new Map()
+) {
+  const coreStoreQuery = buildCoreStoreMock(storeMap);
   return {
     contentTypes,
+    config: { environment: 'test' },
+    db: {
+      query: jest.fn((model: string) => {
+        if (model === 'strapi::core-store') return coreStoreQuery;
+        return null;
+      }),
+    },
+    requestContext: {
+      get: jest.fn(() => ({ state: { userAbility: { can: () => true } } })),
+    },
+    plugin: jest.fn((pluginName: string) => {
+      if (pluginName === 'content-manager') {
+        return {
+          service: jest.fn((serviceName: string) => {
+            if (serviceName === 'permission-checker') {
+              return { create: jest.fn(() => buildPermissionChecker()) };
+            }
+            return null;
+          }),
+        };
+      }
+      return null;
+    }),
     documents: jest.fn().mockReturnValue({
       create: createFn ?? jest.fn().mockResolvedValue({ documentId: 'doc-1' }),
       findMany: jest.fn().mockResolvedValue([]),
@@ -476,10 +545,10 @@ describe('importService.importRecords()', () => {
       jest.useRealTimers();
     });
 
-    test('date フィールドを YYYY-MM-DD 形式の現在日付で補完する', async () => {
+    test('required な date フィールドを YYYY-MM-DD 形式の現在日付で補完する', async () => {
       const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
       const strapi = buildStrapi({
-        [uid]: buildContentType({ title: { type: 'string' }, pubDate: { type: 'date' } }),
+        [uid]: buildContentType({ title: { type: 'string' }, pubDate: { type: 'date', required: true } }),
       }, createFn);
       const service = importServiceFactory({ strapi });
 
@@ -490,10 +559,10 @@ describe('importService.importRecords()', () => {
       });
     });
 
-    test('datetime フィールドを ISO 形式の現在日時で補完する', async () => {
+    test('required な datetime フィールドを ISO 形式の現在日時で補完する', async () => {
       const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
       const strapi = buildStrapi({
-        [uid]: buildContentType({ title: { type: 'string' }, eventAt: { type: 'datetime' } }),
+        [uid]: buildContentType({ title: { type: 'string' }, eventAt: { type: 'datetime', required: true } }),
       }, createFn);
       const service = importServiceFactory({ strapi });
 
@@ -518,10 +587,10 @@ describe('importService.importRecords()', () => {
       });
     });
 
-    test('time フィールドを HH:MM:SS 形式の現在時刻で補完する', async () => {
+    test('required な time フィールドを HH:MM:SS 形式の現在時刻で補完する', async () => {
       const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
       const strapi = buildStrapi({
-        [uid]: buildContentType({ title: { type: 'string' }, startTime: { type: 'time' } }),
+        [uid]: buildContentType({ title: { type: 'string' }, startTime: { type: 'time', required: true } }),
       }, createFn);
       const service = importServiceFactory({ strapi });
 
@@ -1199,10 +1268,11 @@ describe('importService.importRecords()', () => {
 
     test('ロールバック後も updated は保持される（更新は巻き戻せない）', async () => {
       const deleteFn = jest.fn().mockResolvedValue({});
-      // Row A finds existing → update; Row B finds nothing → create (which fails)
+      // Row A finds existing → update (2 findMany: read + update-verification); Row B finds nothing → create (which fails)
       const findManyFn = jest.fn()
-        .mockResolvedValueOnce([{ documentId: 'existing-doc' }])
-        .mockResolvedValueOnce([]);
+        .mockResolvedValueOnce([{ documentId: 'existing-doc' }])  // Row A: read lookup
+        .mockResolvedValueOnce([{ documentId: 'existing-doc' }])  // Row A: update-permission verification
+        .mockResolvedValueOnce([]);                                // Row B: read lookup
       const updateFn = jest.fn().mockResolvedValue({ documentId: 'existing-doc' });
       const createFn = jest.fn().mockRejectedValue(new Error('DB error'));
       const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn, {
@@ -1436,9 +1506,9 @@ describe('importService.importRecords()', () => {
 
   describe('チャンク実行 (runId)', () => {
     test('runId 指定時は結果を累積し最終チャンクで履歴を1件だけ保存する', async () => {
-      (fs.readFileSync as jest.Mock).mockImplementation(() => { throw new Error('ENOENT'); });
+      const storeMap = new Map<string, string>();
       const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
-      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn);
+      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn, {}, storeMap);
       const service = importServiceFactory({ strapi });
 
       const first = await service.importRecords(
@@ -1456,7 +1526,7 @@ describe('importService.importRecords()', () => {
       );
       expect(first.success).toBe(1);
       expect(first.completed).toBe(false);
-      expect(fs.writeFileSync).not.toHaveBeenCalled();
+      expect(storeMap.has('plugin_data-importer_history')).toBe(false);
 
       const second = await service.importRecords(
         uid,
@@ -1473,21 +1543,21 @@ describe('importService.importRecords()', () => {
       );
       expect(second.success).toBe(2);
       expect(second.completed).toBe(true);
-      expect(fs.writeFileSync).toHaveBeenCalledTimes(1);
 
-      const historyJson = (fs.writeFileSync as jest.Mock).mock.calls[0][1];
-      const history = JSON.parse(historyJson);
+      const historyJson = storeMap.get('plugin_data-importer_history');
+      expect(historyJson).toBeDefined();
+      const history = JSON.parse(historyJson!);
       expect(history[0].success).toBe(2);
       expect(history[0].totalRows).toBe(2);
     });
 
     test('runId 指定 + rollbackOnFailure で後続チャンク失敗時に前チャンク作成分も削除する', async () => {
-      (fs.readFileSync as jest.Mock).mockImplementation(() => { throw new Error('ENOENT'); });
+      const storeMap = new Map<string, string>();
       const deleteFn = jest.fn().mockResolvedValue({});
       const createFn = jest.fn()
         .mockResolvedValueOnce({ documentId: 'doc-1' })
         .mockRejectedValueOnce(new Error('DB error'));
-      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn, { delete: deleteFn });
+      const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn, { delete: deleteFn }, storeMap);
       const service = importServiceFactory({ strapi });
 
       await service.importRecords(
@@ -1523,16 +1593,16 @@ describe('importService.importRecords()', () => {
       expect(second.failed).toBe(2);
       expect(second.rollbackApplied).toBe(true);
       expect(second.completed).toBe(true);
-      expect(fs.writeFileSync).toHaveBeenCalledTimes(1);
+      expect(storeMap.has('plugin_data-importer_history')).toBe(true);
     });
 
     test('古い runId 状態は TTL 超過で自動削除される', async () => {
       jest.useFakeTimers();
       try {
-        (fs.readFileSync as jest.Mock).mockImplementation(() => { throw new Error('ENOENT'); });
+        const storeMap = new Map<string, string>();
         const findManyFn = jest.fn().mockResolvedValue([]);
         const createFn = jest.fn().mockResolvedValue({ documentId: 'doc-1' });
-        const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn, { findMany: findManyFn });
+        const strapi = buildStrapi({ [uid]: buildContentType(attributes) }, createFn, { findMany: findManyFn }, storeMap);
         const service = importServiceFactory({ strapi });
 
         await service.importRecords(
@@ -1578,33 +1648,32 @@ describe('importService.importRecords()', () => {
 // getHistory
 // ────────────────────────────
 describe('importService.getHistory()', () => {
-  test('ファイルが存在しない場合は空配列を返す', async () => {
-    (fs.readFileSync as jest.Mock).mockImplementation(() => { throw new Error('ENOENT'); });
+  test('ストアが空の場合は空配列を返す', async () => {
     const service = importServiceFactory({ strapi: buildStrapi({}) });
     const result = await service.getHistory();
     expect(result).toEqual([]);
   });
 
-  test('ファイルが存在する場合はエントリーを返す', async () => {
+  test('ストアにエントリーがある場合は返す', async () => {
     const entries = [
       { id: '1', timestamp: '2024-01-01T00:00:00.000Z', uid: 'api::test.test', displayName: 'Test', dryRun: false, mode: 'create', success: 5, updated: 0, failed: 0, totalRows: 5 },
     ];
-    (fs.readFileSync as jest.Mock).mockReturnValue(JSON.stringify(entries));
-    const service = importServiceFactory({ strapi: buildStrapi({}) });
+    const storeMap = new Map([['plugin_data-importer_history', JSON.stringify(entries)]]);
+    const service = importServiceFactory({ strapi: buildStrapi({}, undefined, {}, storeMap) });
     const result = await service.getHistory();
     expect(result).toEqual(entries);
   });
 
-  test('ファイルの内容が配列でない場合は空配列を返す', async () => {
-    (fs.readFileSync as jest.Mock).mockReturnValue(JSON.stringify({ foo: 'bar' }));
-    const service = importServiceFactory({ strapi: buildStrapi({}) });
+  test('値が配列でない場合は空配列を返す', async () => {
+    const storeMap = new Map([['plugin_data-importer_history', JSON.stringify({ foo: 'bar' })]]);
+    const service = importServiceFactory({ strapi: buildStrapi({}, undefined, {}, storeMap) });
     const result = await service.getHistory();
     expect(result).toEqual([]);
   });
 
   test('不正な JSON の場合は空配列を返す', async () => {
-    (fs.readFileSync as jest.Mock).mockReturnValue('invalid json');
-    const service = importServiceFactory({ strapi: buildStrapi({}) });
+    const storeMap = new Map([['plugin_data-importer_history', 'invalid json']]);
+    const service = importServiceFactory({ strapi: buildStrapi({}, undefined, {}, storeMap) });
     const result = await service.getHistory();
     expect(result).toEqual([]);
   });

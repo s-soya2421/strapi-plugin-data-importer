@@ -1,6 +1,6 @@
 {
   "name": "strapi-plugin-data-importer",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A Strapi plugin to import records from CSV, JSON, and other file formats",
   "keywords": [
     "strapi",
@@ -14,7 +14,14 @@
   "author": "s-soya2421",
   "repository": {
     "type": "git",
-    "url": "https://github.com/s-soya2421/strapi-plugin-data-importer"
+    "url": "git+https://github.com/s-soya2421/strapi-plugin-data-importer.git"
+  },
+  "homepage": "https://github.com/s-soya2421/strapi-plugin-data-importer#readme",
+  "bugs": {
+    "url": "https://github.com/s-soya2421/strapi-plugin-data-importer/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "strapi": {
     "name": "data-importer",
@@ -47,22 +54,29 @@
     "test:server": "jest --testPathPattern=server/src/__tests__",
     "test:admin": "jest --testPathPattern=admin/src/__tests__",
     "lint": "tsc --noEmit",
-    "gen:fixtures": "node scripts/generate-large-dataset.mjs"
+    "gen:fixtures": "node scripts/generate-large-dataset.mjs",
+    "verify:plugin": "npx --yes @strapi/sdk-plugin@6.0.1 verify",
+    "release:check": "npm run lint && npm test -- --runInBand && npm run build && npm run verify:plugin"
   },
   "jest": {
     "testEnvironment": "node",
     "transform": {
-      "^.+\\.tsx?$": ["ts-jest", {
-        "tsconfig": {
-          "moduleResolution": "node",
-          "jsx": "react-jsx",
-          "esModuleInterop": true,
-          "baseUrl": ".",
-          "paths": {
-            "@strapi/admin/strapi-admin": ["admin/src/__mocks__/@strapi/admin/strapi-admin.ts"]
+      "^.+\\.tsx?$": [
+        "ts-jest",
+        {
+          "tsconfig": {
+            "moduleResolution": "node",
+            "jsx": "react-jsx",
+            "esModuleInterop": true,
+            "baseUrl": ".",
+            "paths": {
+              "@strapi/admin/strapi-admin": [
+                "admin/src/__mocks__/@strapi/admin/strapi-admin.ts"
+              ]
+            }
           }
         }
-      }]
+      ]
     },
     "moduleNameMapper": {
       "^@strapi/admin/strapi-admin$": "<rootDir>/admin/src/__mocks__/@strapi/admin/strapi-admin.ts"
