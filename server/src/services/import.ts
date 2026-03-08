@@ -1,5 +1,8 @@
 import fs from 'fs';
 import path from 'path';
+import { errors } from '@strapi/utils';
+
+const { ForbiddenError } = errors;
 
 const DATE_TYPES = ['date', 'datetime', 'time'];
 const FLOAT_PATTERN = /^-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
@@ -14,10 +17,50 @@ const SYSTEM_FIELDS = new Set([
 ]);
 const NON_IMPORTABLE_FIELD_TYPES = new Set(['component', 'dynamiczone']);
 const IMPORT_RUN_TTL_MS = 30 * 60 * 1000;
+const HISTORY_STORE_KEY = 'plugin_data-importer_history';
+const RUN_STORE_KEY_PREFIX = 'plugin_data-importer_run:';
+const STORE_SCOPE = {
+  type: 'plugin',
+  tag: 'data-importer',
+};
+
+type ImportMode = 'create' | 'upsert';
+
+type ContentTypeAttributes = Record<string, any>;
+
+type ImportRow = Record<string, string>;
+
+type QueryLike = {
+  findOne?: (params: { where: Record<string, unknown> }) => Promise<any>;
+  create?: (params: { data: Record<string, unknown> }) => Promise<any>;
+  update?: (params: {
+    where: Record<string, unknown>;
+    data: Record<string, unknown>;
+  }) => Promise<any>;
+  delete?: (params: { where: Record<string, unknown> }) => Promise<any>;
+  deleteMany?: (params: { where: Record<string, unknown> }) => Promise<any>;
+};
+
+type PermissionChecker = {
+  cannot?: {
+    read?: (entity?: unknown, field?: string) => boolean;
+    create?: (entity?: unknown, field?: string) => boolean;
+    update?: (entity?: unknown, field?: string) => boolean;
+  };
+  sanitizeCreateInput?: (data: Record<string, any>) => Promise<Record<string, any>> | Record<string, any>;
+  sanitizeUpdateInput?: (
+    entity: Record<string, any>
+  ) =>
+    | ((data: Record<string, any>) => Promise<Record<string, any>> | Record<string, any>)
+    | undefined;
+  sanitizedQuery?: {
+    read?: (query: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
+    update?: (query: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
+  };
+};
 
 interface FsPromisesLike {
   readFile?: (filePath: string, encoding: BufferEncoding) => Promise<string>;
-  writeFile?: (filePath: string, data: string, encoding: BufferEncoding) => Promise<void>;
 }
 
 export interface ImportResult {
@@ -25,7 +68,7 @@ export interface ImportResult {
   updated: number;
   failed: number;
   errors: string[];
-  failedRows: Record<string, string>[];
+  failedRows: ImportRow[];
   rollbackApplied?: boolean;
   completed?: boolean;
 }
@@ -34,12 +77,25 @@ interface ImportRunState {
   uid: string;
   displayName: string;
   dryRun: boolean;
-  mode: 'create' | 'upsert';
+  mode: ImportMode;
   totalRows: number;
   createdDocumentIds: string[];
-  createdRows: Record<string, string>[];
+  createdRows: ImportRow[];
   result: ImportResult;
   lastTouchedAt: number;
+}
+
+export interface HistoryEntry {
+  id: string;
+  timestamp: string;
+  uid: string;
+  displayName: string;
+  dryRun: boolean;
+  mode: ImportMode;
+  success: number;
+  updated: number;
+  failed: number;
+  totalRows: number;
 }
 
 function createEmptyImportResult(): ImportResult {
@@ -56,15 +112,6 @@ async function readTextFile(filePath: string): Promise<string> {
     return promisesApi.readFile(filePath, 'utf-8');
   }
   return fs.readFileSync(filePath, 'utf-8');
-}
-
-async function writeTextFile(filePath: string, data: string): Promise<void> {
-  const promisesApi = getFsPromisesApi();
-  if (typeof promisesApi?.writeFile === 'function') {
-    await promisesApi.writeFile(filePath, data, 'utf-8');
-    return;
-  }
-  fs.writeFileSync(filePath, data, 'utf-8');
 }
 
 function validateValue(value: string, attr: any, fieldName: string, rowNum: number): string | null {
@@ -152,22 +199,216 @@ function isMissingRequiredValue(value: unknown): boolean {
   return false;
 }
 
-export interface HistoryEntry {
-  id: string;
-  timestamp: string;
-  uid: string;
-  displayName: string;
-  dryRun: boolean;
-  mode: 'create' | 'upsert';
-  success: number;
-  updated: number;
-  failed: number;
-  totalRows: number;
+function getStoreWhere(strapi: any, key: string) {
+  return {
+    key,
+    ...STORE_SCOPE,
+    environment: strapi?.config?.environment ?? '',
+  };
+}
+
+function getCoreStoreQuery(strapi: any): QueryLike | null {
+  if (typeof strapi?.db?.query === 'function') {
+    return strapi.db.query('strapi::core-store');
+  }
+  if (typeof strapi?.query === 'function') {
+    return strapi.query('strapi::core-store');
+  }
+  return null;
+}
+
+async function readCoreStoreJson<T>(strapi: any, key: string, fallback: T): Promise<T> {
+  const query = getCoreStoreQuery(strapi);
+  if (!query?.findOne) return fallback;
+
+  try {
+    const entry = await query.findOne({ where: getStoreWhere(strapi, key) });
+    if (!entry || typeof entry.value !== 'string') {
+      return fallback;
+    }
+
+    return JSON.parse(entry.value) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+async function writeCoreStoreJson(strapi: any, key: string, value: unknown): Promise<void> {
+  const query = getCoreStoreQuery(strapi);
+  if (!query?.create || !query?.update) return;
+
+  const where = getStoreWhere(strapi, key);
+  const data = {
+    ...where,
+    value: JSON.stringify(value),
+  };
+  const existing = query.findOne ? await query.findOne({ where }) : null;
+
+  if (existing) {
+    await query.update({ where, data });
+    return;
+  }
+
+  await query.create({ data });
+}
+
+async function deleteCoreStoreJson(strapi: any, key: string): Promise<void> {
+  const query = getCoreStoreQuery(strapi);
+  if (!query) return;
+
+  const where = getStoreWhere(strapi, key);
+  if (typeof query.delete === 'function') {
+    await query.delete({ where });
+    return;
+  }
+  if (typeof query.deleteMany === 'function') {
+    await query.deleteMany({ where });
+    return;
+  }
+}
+
+function getImportRunKey(runId: string): string {
+  return `${RUN_STORE_KEY_PREFIX}${runId}`;
+}
+
+function getPermissionChecker(strapi: any, model: string): PermissionChecker | null {
+  const userAbility = strapi?.requestContext?.get?.()?.state?.userAbility;
+  const permissionCheckerService = strapi?.plugin?.('content-manager')?.service?.('permission-checker');
+
+  if (!userAbility || typeof permissionCheckerService?.create !== 'function') {
+    return null;
+  }
+
+  return permissionCheckerService.create({ userAbility, model }) as PermissionChecker;
+}
+
+function requirePermissionChecker(strapi: any, model: string): PermissionChecker {
+  const permissionChecker = getPermissionChecker(strapi, model);
+  if (!permissionChecker) {
+    throw new ForbiddenError('Unable to verify content permissions for this request');
+  }
+  return permissionChecker;
+}
+
+function isActionForbidden(
+  permissionChecker: PermissionChecker | null,
+  action: 'read' | 'create' | 'update',
+  entity?: unknown
+): boolean {
+  const cannot = permissionChecker?.cannot?.[action];
+  if (typeof cannot !== 'function') {
+    return false;
+  }
+  return cannot(entity) === true;
+}
+
+async function sanitizePermissionQuery(
+  permissionChecker: PermissionChecker,
+  action: 'read' | 'update',
+  query: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  const sanitizer = permissionChecker.sanitizedQuery?.[action];
+  if (typeof sanitizer !== 'function') {
+    return query;
+  }
+  return sanitizer(query);
+}
+
+async function sanitizeCreateData(
+  permissionChecker: PermissionChecker,
+  data: Record<string, any>
+): Promise<Record<string, any>> {
+  if (typeof permissionChecker.sanitizeCreateInput !== 'function') {
+    return data;
+  }
+  return permissionChecker.sanitizeCreateInput(data);
+}
+
+async function sanitizeUpdateData(
+  permissionChecker: PermissionChecker,
+  entity: Record<string, any>,
+  data: Record<string, any>
+): Promise<Record<string, any>> {
+  if (typeof permissionChecker.sanitizeUpdateInput !== 'function') {
+    return data;
+  }
+
+  const sanitizer = permissionChecker.sanitizeUpdateInput(entity);
+  if (typeof sanitizer !== 'function') {
+    return data;
+  }
+
+  return sanitizer(data);
+}
+
+function fillDefaultRequiredDateFields(
+  data: Record<string, any>,
+  attributes: ContentTypeAttributes,
+  mappedFields: Set<string>
+): Record<string, any> {
+  const nextData = { ...data };
+  const now = new Date();
+
+  for (const [fieldName, attr] of Object.entries(attributes)) {
+    if (
+      SYSTEM_FIELDS.has(fieldName) ||
+      !isImportableAttribute(attr) ||
+      attr.required !== true ||
+      !DATE_TYPES.includes(attr.type) ||
+      mappedFields.has(fieldName) ||
+      fieldName in nextData
+    ) {
+      continue;
+    }
+
+    if (attr.type === 'date') {
+      nextData[fieldName] = now.toISOString().split('T')[0];
+    } else if (attr.type === 'time') {
+      nextData[fieldName] = now.toTimeString().split(' ')[0];
+    } else {
+      nextData[fieldName] = now.toISOString();
+    }
+  }
+
+  return nextData;
+}
+
+function getRequiredFieldError(
+  attributes: ContentTypeAttributes,
+  data: Record<string, any>,
+  rowNum: number
+): string | null {
+  for (const [fieldName, attr] of Object.entries(attributes)) {
+    if (
+      SYSTEM_FIELDS.has(fieldName) ||
+      !isImportableAttribute(attr) ||
+      attr.required !== true
+    ) {
+      continue;
+    }
+
+    if (isMissingRequiredValue(data[fieldName])) {
+      return `Row ${rowNum}: field '${fieldName}' is required`;
+    }
+  }
+
+  return null;
+}
+
+function cloneImportResult(result: ImportResult): ImportResult {
+  return {
+    ...result,
+    errors: [...result.errors],
+    failedRows: [...result.failedRows],
+  };
+}
+
+function buildRowPermissionError(rowNum: number, action: 'create' | 'update', uid: string): string {
+  return `Row ${rowNum}: you do not have permission to ${action} records for '${uid}'`;
 }
 
 export default ({ strapi }: { strapi: any }) => {
-  const historyPath = path.join(process.cwd(), 'config', 'data-importer-history.json');
-  const importRuns = new Map<string, ImportRunState>();
+  const mappingPath = path.join(process.cwd(), 'config', 'data-importer-mappings.json');
   let historyWriteQueue: Promise<void> = Promise.resolve();
 
   const queueHistoryWrite = async (writeOperation: () => Promise<void>) => {
@@ -179,35 +420,21 @@ export default ({ strapi }: { strapi: any }) => {
     return pending;
   };
 
-  const cleanupStaleRuns = () => {
-    const now = Date.now();
-    for (const [id, state] of importRuns.entries()) {
-      if (now - state.lastTouchedAt > IMPORT_RUN_TTL_MS) {
-        importRuns.delete(id);
-      }
-    }
+  const readHistory = async (): Promise<HistoryEntry[]> => {
+    const history = await readCoreStoreJson<unknown>(strapi, HISTORY_STORE_KEY, []);
+    return Array.isArray(history) ? (history as HistoryEntry[]) : [];
   };
 
-  const _readHistory = async (): Promise<HistoryEntry[]> => {
-    try {
-      const data = await readTextFile(historyPath);
-      const parsed = JSON.parse(data);
-      return Array.isArray(parsed) ? parsed : [];
-    } catch {
-      return [];
-    }
-  };
-
-  const _writeHistoryEntry = async (
+  const writeHistoryEntry = async (
     uid: string,
     displayName: string,
     dryRun: boolean,
-    mode: 'create' | 'upsert',
+    mode: ImportMode,
     result: ImportResult,
     totalRows: number
   ) => {
     return queueHistoryWrite(async () => {
-      const history = await _readHistory();
+      const history = await readHistory();
       history.unshift({
         id: Date.now().toString(),
         timestamp: new Date().toISOString(),
@@ -220,15 +447,42 @@ export default ({ strapi }: { strapi: any }) => {
         failed: result.failed,
         totalRows,
       });
-      await writeTextFile(historyPath, JSON.stringify(history.slice(0, 50), null, 2));
+      await writeCoreStoreJson(strapi, HISTORY_STORE_KEY, history.slice(0, 50));
     });
   };
 
-  const _rollbackCreatedDocuments = async (
+  const loadRunState = async (runId: string): Promise<ImportRunState | null> => {
+    const runState = await readCoreStoreJson<ImportRunState | null>(
+      strapi,
+      getImportRunKey(runId),
+      null
+    );
+
+    if (!runState || !isPlainObject(runState)) {
+      return null;
+    }
+
+    if (Date.now() - Number(runState.lastTouchedAt ?? 0) > IMPORT_RUN_TTL_MS) {
+      await deleteCoreStoreJson(strapi, getImportRunKey(runId));
+      return null;
+    }
+
+    return runState;
+  };
+
+  const saveRunState = async (runId: string, state: ImportRunState) => {
+    await writeCoreStoreJson(strapi, getImportRunKey(runId), state);
+  };
+
+  const deleteRunState = async (runId: string) => {
+    await deleteCoreStoreJson(strapi, getImportRunKey(runId));
+  };
+
+  const rollbackCreatedDocuments = async (
     uid: string,
     createdDocumentIds: string[],
     result: ImportResult,
-    createdRows: Record<string, string>[]
+    createdRows: ImportRow[]
   ) => {
     const rollbackDeleteErrors: string[] = [];
     for (const documentId of createdDocumentIds) {
@@ -255,7 +509,6 @@ export default ({ strapi }: { strapi: any }) => {
 
   return {
     async getMappings(): Promise<Record<string, Record<string, string>>> {
-      const mappingPath = path.join(process.cwd(), 'config', 'data-importer-mappings.json');
       try {
         const raw = await readTextFile(mappingPath);
         const parsed = JSON.parse(raw);
@@ -267,10 +520,31 @@ export default ({ strapi }: { strapi: any }) => {
 
     async getContentTypes() {
       const contentTypes = strapi.contentTypes;
-      const result: Array<{ uid: string; displayName: string; fields: Array<{ name: string; type: string; relationType?: string; multiple?: boolean; required?: boolean; unique?: boolean }> }> = [];
+      const result: Array<{
+        uid: string;
+        displayName: string;
+        fields: Array<{
+          name: string;
+          type: string;
+          relationType?: string;
+          multiple?: boolean;
+          required?: boolean;
+          unique?: boolean;
+        }>;
+      }> = [];
 
       for (const [uid, contentType] of Object.entries(contentTypes) as [string, any][]) {
         if (!uid.startsWith('api::')) continue;
+
+        const permissionChecker = getPermissionChecker(strapi, uid);
+        const hasAccess =
+          !permissionChecker ||
+          !isActionForbidden(permissionChecker, 'read') ||
+          !isActionForbidden(permissionChecker, 'create') ||
+          !isActionForbidden(permissionChecker, 'update');
+        if (!hasAccess) {
+          continue;
+        }
 
         const fields = Object.entries(contentType.attributes as Record<string, any>)
           .filter(([name, attr]) => {
@@ -278,7 +552,14 @@ export default ({ strapi }: { strapi: any }) => {
             return isImportableAttribute(attr);
           })
           .map(([name, attr]) => {
-            const field: { name: string; type: string; relationType?: string; multiple?: boolean; required?: boolean; unique?: boolean } = { name, type: attr.type };
+            const field: {
+              name: string;
+              type: string;
+              relationType?: string;
+              multiple?: boolean;
+              required?: boolean;
+              unique?: boolean;
+            } = { name, type: attr.type };
             if (attr.type === 'relation') {
               field.relationType = attr.relationType;
             }
@@ -305,24 +586,22 @@ export default ({ strapi }: { strapi: any }) => {
     },
 
     async getHistory(): Promise<HistoryEntry[]> {
-      return _readHistory();
+      return readHistory();
     },
 
     async importRecords(
       uid: string,
-      rows: Record<string, string>[],
+      rows: ImportRow[],
       fieldMapping: Record<string, string>,
       dryRun = false,
       batchOffset = 0,
-      importMode: 'create' | 'upsert' = 'create',
+      importMode: ImportMode = 'create',
       keyField?: string,
       rollbackOnFailure = false,
       runId?: string,
       isFinalChunk = false,
       totalRows?: number
     ) {
-      cleanupStaleRuns();
-
       if (typeof uid !== 'string' || uid.trim() === '') {
         throw new Error('uid must be a non-empty string');
       }
@@ -350,7 +629,24 @@ export default ({ strapi }: { strapi: any }) => {
         throw new Error(`Content type ${uid} not found`);
       }
 
-      const attributes = contentType.attributes as Record<string, any>;
+      const permissionChecker = requirePermissionChecker(strapi, uid);
+      if (importMode === 'create' && isActionForbidden(permissionChecker, 'create')) {
+        throw new ForbiddenError(`You do not have permission to create records for '${uid}'`);
+      }
+      if (importMode === 'upsert' && isActionForbidden(permissionChecker, 'read')) {
+        throw new ForbiddenError(`You do not have permission to read records for '${uid}'`);
+      }
+      if (
+        importMode === 'upsert' &&
+        isActionForbidden(permissionChecker, 'create') &&
+        isActionForbidden(permissionChecker, 'update')
+      ) {
+        throw new ForbiddenError(
+          `You do not have permission to create or update records for '${uid}'`
+        );
+      }
+
+      const attributes = contentType.attributes as ContentTypeAttributes;
       const results = createEmptyImportResult();
 
       const mappedStrapiFields = new Set(
@@ -372,13 +668,17 @@ export default ({ strapi }: { strapi: any }) => {
       }
 
       const createdDocumentIds: string[] = [];
-      const createdRows: Record<string, string>[] = [];
+      const createdRows: ImportRow[] = [];
 
       let runState: ImportRunState | null = null;
       if (runId) {
-        const existingState = importRuns.get(runId);
+        const existingState = await loadRunState(runId);
         if (existingState) {
-          if (existingState.uid !== uid || existingState.mode !== importMode || existingState.dryRun !== dryRun) {
+          if (
+            existingState.uid !== uid ||
+            existingState.mode !== importMode ||
+            existingState.dryRun !== dryRun
+          ) {
             throw new Error(`runId '${runId}' does not match current import settings`);
           }
           if (typeof totalRows === 'number' && totalRows > 0) {
@@ -398,7 +698,6 @@ export default ({ strapi }: { strapi: any }) => {
             result: createEmptyImportResult(),
             lastTouchedAt: Date.now(),
           };
-          importRuns.set(runId, runState);
         }
       }
 
@@ -406,7 +705,6 @@ export default ({ strapi }: { strapi: any }) => {
         const row = rows[i];
         const rowNum = batchOffset + i + 2;
 
-        // Feature 5: field type validation before data build
         for (const [csvColumn, strapiField] of Object.entries(fieldMapping)) {
           if (!strapiField || !csvColumn) continue;
           const rawValue = row[csvColumn];
@@ -439,88 +737,111 @@ export default ({ strapi }: { strapi: any }) => {
           } else if (type === 'float' || type === 'decimal') {
             data[strapiField] = parseFloat(rawValue.trim());
           } else if (type === 'boolean') {
-            data[strapiField] =
-              rawValue.toLowerCase() === 'true' || rawValue === '1';
+            data[strapiField] = rawValue.toLowerCase() === 'true' || rawValue === '1';
           } else if (type === 'relation') {
             const ids = rawValue.split(',').map((s: string) => s.trim()).filter(Boolean);
             data[strapiField] = { connect: ids.map((documentId: string) => ({ documentId })) };
           } else if (type === 'media') {
-            const ids = rawValue.split(',').map((s: string) => parseInt(s.trim(), 10)).filter((n: number) => !isNaN(n));
+            const ids = rawValue
+              .split(',')
+              .map((s: string) => parseInt(s.trim(), 10))
+              .filter((n: number) => !isNaN(n));
             data[strapiField] = { connect: ids.map((id: number) => ({ id })) };
           } else {
             data[strapiField] = rawValue;
           }
         }
 
-        // 日付系フィールドを現在日時で自動補完（マッピング済みフィールドは除く）
-        const now = new Date();
-        for (const [fieldName, attr] of Object.entries(attributes)) {
-          if (
-            SYSTEM_FIELDS.has(fieldName) ||
-            !isImportableAttribute(attr) ||
-            !DATE_TYPES.includes(attr.type) ||
-            mappedStrapiFields.has(fieldName) ||
-            fieldName in data
-          ) {
-            continue;
-          }
+        let operation: 'create' | 'update' = 'create';
+        let existingDocument: Record<string, any> | undefined;
 
-          if (attr.type === 'date') {
-            data[fieldName] = now.toISOString().split('T')[0];
-          } else if (attr.type === 'time') {
-            data[fieldName] = now.toTimeString().split(' ')[0];
-          } else {
-            data[fieldName] = now.toISOString();
-          }
-        }
-
-        // Feature 6: required field check (includes unmapped required fields)
-        for (const [fieldName, attr] of Object.entries(attributes)) {
-          if (
-            SYSTEM_FIELDS.has(fieldName) ||
-            !isImportableAttribute(attr) ||
-            attr.required !== true
-          ) {
-            continue;
-          }
-
-          if (isMissingRequiredValue(data[fieldName])) {
+        if (importMode === 'upsert' && keyField) {
+          if (data[keyField] === undefined) {
             results.failed++;
             results.failedRows.push(row);
-            results.errors.push(`Row ${rowNum}: field '${fieldName}' is required`);
-            continue outer;
+            results.errors.push(`Row ${rowNum}: key field '${keyField}' is required for upsert`);
+            continue;
           }
-        }
 
-        if (importMode === 'upsert' && keyField && data[keyField] === undefined) {
-          results.failed++;
-          results.failedRows.push(row);
-          results.errors.push(`Row ${rowNum}: key field '${keyField}' is required for upsert`);
-          continue;
+          const readQuery = await sanitizePermissionQuery(permissionChecker, 'read', {
+            filters: { [keyField]: data[keyField] },
+            limit: 2,
+          });
+          const existing = await strapi.documents(uid).findMany(readQuery);
+
+          if (existing.length > 1) {
+            results.failed++;
+            results.failedRows.push(row);
+            results.errors.push(
+              `Row ${rowNum}: multiple records matched key field '${keyField}' with value '${data[keyField]}'`
+            );
+            continue;
+          }
+
+          if (existing.length === 1) {
+            if (isActionForbidden(permissionChecker, 'update')) {
+              results.failed++;
+              results.failedRows.push(row);
+              results.errors.push(buildRowPermissionError(rowNum, 'update', uid));
+              continue;
+            }
+
+            const updateQuery = await sanitizePermissionQuery(permissionChecker, 'update', {
+              filters: { documentId: existing[0].documentId },
+              limit: 1,
+            });
+            const updatableRecords = await strapi.documents(uid).findMany(updateQuery);
+            if (updatableRecords.length === 0) {
+              results.failed++;
+              results.failedRows.push(row);
+              results.errors.push(buildRowPermissionError(rowNum, 'update', uid));
+              continue;
+            }
+
+            existingDocument = updatableRecords[0];
+            if (isActionForbidden(permissionChecker, 'update', existingDocument)) {
+              results.failed++;
+              results.failedRows.push(row);
+              results.errors.push(buildRowPermissionError(rowNum, 'update', uid));
+              continue;
+            }
+
+            operation = 'update';
+          } else if (isActionForbidden(permissionChecker, 'create')) {
+            results.failed++;
+            results.failedRows.push(row);
+            results.errors.push(buildRowPermissionError(rowNum, 'create', uid));
+            continue;
+          }
         }
 
         try {
-          if (!dryRun) {
-            if (importMode === 'upsert' && keyField && data[keyField] !== undefined) {
-              const existing = await strapi.documents(uid).findMany({
-                filters: { [keyField]: data[keyField] },
-                limit: 2,
+          if (operation === 'update' && existingDocument) {
+            const updateData = await sanitizeUpdateData(permissionChecker, existingDocument, data);
+            if (!dryRun) {
+              await strapi.documents(uid).update({
+                documentId: existingDocument.documentId,
+                data: updateData,
               });
-              if (existing.length > 1) {
-                results.failed++;
-                results.failedRows.push(row);
-                results.errors.push(
-                  `Row ${rowNum}: multiple records matched key field '${keyField}' with value '${data[keyField]}'`
-                );
-                continue;
-              }
-              if (existing.length === 1) {
-                await strapi.documents(uid).update({ documentId: existing[0].documentId, data });
-                results.updated++;
-                continue;
-              }
             }
-            const created = await strapi.documents(uid).create({ data });
+            results.updated++;
+            continue;
+          }
+
+          const createData = await sanitizeCreateData(
+            permissionChecker,
+            fillDefaultRequiredDateFields(data, attributes, mappedStrapiFields)
+          );
+          const requiredFieldError = getRequiredFieldError(attributes, createData, rowNum);
+          if (requiredFieldError) {
+            results.failed++;
+            results.failedRows.push(row);
+            results.errors.push(requiredFieldError);
+            continue;
+          }
+
+          if (!dryRun) {
+            const created = await strapi.documents(uid).create({ data: createData });
             if (rollbackOnFailure) {
               createdDocumentIds.push(created.documentId);
               createdRows.push(row);
@@ -536,7 +857,7 @@ export default ({ strapi }: { strapi: any }) => {
         }
       }
 
-      if (runState) {
+      if (runState && runId) {
         runState.lastTouchedAt = Date.now();
         runState.result.success += results.success;
         runState.result.updated += results.updated;
@@ -546,8 +867,18 @@ export default ({ strapi }: { strapi: any }) => {
         runState.createdDocumentIds.push(...createdDocumentIds);
         runState.createdRows.push(...createdRows);
 
-        if (rollbackOnFailure && runState.result.failed > 0 && !dryRun && runState.createdDocumentIds.length > 0) {
-          await _rollbackCreatedDocuments(uid, runState.createdDocumentIds, runState.result, runState.createdRows);
+        if (
+          rollbackOnFailure &&
+          runState.result.failed > 0 &&
+          !dryRun &&
+          runState.createdDocumentIds.length > 0
+        ) {
+          await rollbackCreatedDocuments(
+            uid,
+            runState.createdDocumentIds,
+            runState.result,
+            runState.createdRows
+          );
           runState.createdDocumentIds = [];
           runState.createdRows = [];
         }
@@ -557,7 +888,7 @@ export default ({ strapi }: { strapi: any }) => {
 
         if (completed) {
           try {
-            await _writeHistoryEntry(
+            await writeHistoryEntry(
               uid,
               runState.displayName,
               runState.dryRun,
@@ -568,26 +899,21 @@ export default ({ strapi }: { strapi: any }) => {
           } catch {
             // ignore history write errors
           } finally {
-            if (runId) {
-              importRuns.delete(runId);
-            }
+            await deleteRunState(runId);
           }
+        } else {
+          await saveRunState(runId, runState);
         }
 
-        return {
-          ...runState.result,
-          errors: [...runState.result.errors],
-          failedRows: [...runState.result.failedRows],
-        };
+        return cloneImportResult(runState.result);
       }
 
-      // Non-chunked call (backward-compatible path)
       if (rollbackOnFailure && results.failed > 0 && !dryRun && createdDocumentIds.length > 0) {
-        await _rollbackCreatedDocuments(uid, createdDocumentIds, results, createdRows);
+        await rollbackCreatedDocuments(uid, createdDocumentIds, results, createdRows);
       }
 
       try {
-        await _writeHistoryEntry(
+        await writeHistoryEntry(
           uid,
           contentType.info?.displayName ?? uid,
           dryRun,

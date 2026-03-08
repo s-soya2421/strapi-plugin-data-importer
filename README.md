@@ -20,6 +20,8 @@ Strapi v5 plugin to import content records from CSV or JSON files via the admin 
 - **Failed rows table** — view failing rows alongside their error messages, with a retry button
 - **Import history** — view the last 50 import runs (created / updated / failed counts)
 - **RBAC support** — separate plugin permissions for read and import execution
+- **Content-type permission enforcement** — import respects each user's create/update/read permissions on the target content type; rows the user cannot write are rejected with a clear error message
+- **Data sanitization** — imported data is sanitized through Strapi's permission-checker, stripping any fields the user is not allowed to set
 
 ## Requirements
 
@@ -156,6 +158,21 @@ When enabled, if any row in the import fails, all records created during that ru
 ### Batch size
 
 Large files are split into batches before being sent to the server (default: 100 rows per batch). Reducing the batch size can help avoid timeouts on slow connections or large payloads.
+
+## Permissions
+
+The plugin enforces Strapi's content-type permissions before and during import:
+
+| Import mode | Required permissions |
+|---|---|
+| **Create** | `create` on the target content type |
+| **Upsert** | `read` on the target content type, plus `create` and/or `update` |
+
+If the current user lacks the required permission at the start of an import, the entire run is rejected. For upsert imports, each row is also checked individually — a row that the user cannot update (e.g. due to field-level conditions) is counted as failed and shown in the results table.
+
+Imported data is automatically sanitized through Strapi's permission-checker, so fields the user is not allowed to set are silently stripped before the record is written.
+
+To grant a role access to import, configure the role in **Settings → Roles** and enable the relevant create/update permissions for the target content type, in addition to the Data Importer plugin permissions.
 
 ## Import history
 
