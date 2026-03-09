@@ -488,6 +488,14 @@ const HomePage = () => {
               )}
             </div>
           )}
+          {csvRows.length > 10000 && (
+            <div style={{ ...styles.warning, background: '#fcecea', color: '#d02b20', marginTop: '4px' }}>
+              {formatMessage(
+                { id: 'data-importer.step2.largeFileWarning', defaultMessage: 'Large file detected ({rows} rows). All rows are loaded into browser memory. Consider splitting the file into smaller chunks if you experience performance issues.' },
+                { rows: csvRows.length }
+              )}
+            </div>
+          )}
           {/* Preview: first 5 rows */}
           {csvRows.length > 0 && csvHeaders.length > 0 && (
             <div style={{ marginTop: '16px' }}>
@@ -620,6 +628,19 @@ const HomePage = () => {
               />
               {formatMessage({ id: 'data-importer.step4.rollbackOnFailure', defaultMessage: 'Rollback on failure (undo creates if any row fails)' })}
             </label>
+            {rollbackOnFailure && (
+              <p style={{ fontSize: '12px', color: '#666', marginTop: '4px', marginLeft: '24px' }}>
+                {importMode === 'upsert'
+                  ? formatMessage({
+                      id: 'data-importer.step4.rollbackNoteUpsert',
+                      defaultMessage: 'Note: only newly created records will be deleted on rollback. Updates performed during upsert cannot be undone.',
+                    })
+                  : formatMessage({
+                      id: 'data-importer.step4.rollbackNote',
+                      defaultMessage: 'Note: only records created during this run will be deleted on rollback.',
+                    })}
+              </p>
+            )}
           </div>
           <div style={{ marginBottom: '12px' }}>
             <label style={styles.label}>

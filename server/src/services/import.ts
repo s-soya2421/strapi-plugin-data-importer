@@ -129,7 +129,7 @@ function validateValue(value: string, attr: any, fieldName: string, rowNum: numb
       return `Row ${rowNum}: field '${fieldName}' expects boolean (true/false/1/0), got '${value}'`;
     }
   } else if (type === 'email') {
-    if (!/@.+\..+/.test(value)) {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
       return `Row ${rowNum}: field '${fieldName}' expects email, got '${value}'`;
     }
   } else if (type === 'enumeration') {
@@ -484,6 +484,9 @@ export default ({ strapi }: { strapi: any }) => {
     result: ImportResult,
     createdRows: ImportRow[]
   ) => {
+    strapi.log?.warn(
+      `[data-importer] Rollback triggered: uid=${uid}, deleting ${createdDocumentIds.length} record(s)`
+    );
     const rollbackDeleteErrors: string[] = [];
     for (const documentId of createdDocumentIds) {
       try {
@@ -645,6 +648,10 @@ export default ({ strapi }: { strapi: any }) => {
           `You do not have permission to create or update records for '${uid}'`
         );
       }
+
+      strapi.log?.info(
+        `[data-importer] Import chunk: uid=${uid}, mode=${importMode}, dryRun=${dryRun}, rows=${rows.length}, batchOffset=${batchOffset}, runId=${runId ?? 'none'}`
+      );
 
       const attributes = contentType.attributes as ContentTypeAttributes;
       const results = createEmptyImportResult();
@@ -887,6 +894,9 @@ export default ({ strapi }: { strapi: any }) => {
         runState.result.completed = completed;
 
         if (completed) {
+          strapi.log?.info(
+            `[data-importer] Import completed: uid=${uid}, mode=${importMode}, dryRun=${dryRun}, created=${runState.result.success}, updated=${runState.result.updated}, failed=${runState.result.failed}, rollbackApplied=${!!runState.result.rollbackApplied}, runId=${runId}`
+          );
           try {
             await writeHistoryEntry(
               uid,
