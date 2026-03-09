@@ -134,7 +134,7 @@ The following fields are validated before import. Rows that fail validation are 
 | `integer`, `biginteger` | Must match `/^-?\d+$/` |
 | `float`, `decimal` | Must be parseable as a number |
 | `boolean` | Must be one of `true`, `false`, `1`, `0` (case-insensitive) |
-| `email` | Must match `/@.+\..+/` |
+| `email` | Must match `/^[^\s@]+@[^\s@]+\.[^\s@]+$/` (no spaces, must contain `@` and a dot in the domain) |
 | `enumeration` | Must be one of the configured enum values |
 | Required fields | Must not be empty |
 
@@ -145,7 +145,7 @@ The following fields are validated before import. Rows that fail validation are 
 | Mode | Behavior |
 |---|---|
 | **Create** (default) | Always insert a new record for every row |
-| **Upsert** | Search for an existing record by the selected key field. The key field must be marked `unique` in the content type. If one match is found, update it; if none, create a new one. |
+| **Upsert** | Search for an existing record by the selected key field. The key field must be marked `unique` in the content type. If one match is found, update it; if none, create a new one. If more than one match is found, the row fails with an error and is shown in the failed rows table. |
 
 ### Dry run
 
@@ -176,7 +176,7 @@ To grant a role access to import, configure the role in **Settings → Roles** a
 
 ## Import history
 
-After each import, a summary entry is saved to `config/data-importer-history.json` (up to 50 entries, newest first). The history table in the UI shows the date/time, content type, mode, and counts for the last 10 runs. Dry-run entries are marked with a checkmark.
+After each import, a summary entry is saved to Strapi's internal store (up to 50 entries, newest first). The history table in the UI shows the date/time, content type, mode, and counts for the last 10 runs. Dry-run entries are marked with a checkmark.
 
 ## Staging validation runbook
 
