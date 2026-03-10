@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-03-10
+
+### Fixed
+
+- Exclude `@strapi/admin` from the plugin bundle to prevent duplicate module loading and reduce dist size (22MB → 448KB)
+
 ## [0.2.0] - 2026-03-04
 
 ### Added
