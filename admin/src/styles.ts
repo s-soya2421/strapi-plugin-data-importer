@@ -8,7 +8,7 @@ export const styles: Record<string, CSSProperties> = {
   select: { width: '100%', padding: '8px 12px', borderRadius: '4px', border: '1px solid #dcdce4', fontSize: '14px' },
   input: { padding: '8px 12px', borderRadius: '4px', border: '1px solid #dcdce4', fontSize: '14px' },
   table: { width: '100%', borderCollapse: 'collapse', marginTop: '16px' },
-  th: { textAlign: 'left', padding: '8px 12px', background: '#f6f6f9', borderBottom: '2px solid #dcdce4', fontWeight: 600 },
+  th: { textAlign: 'left', padding: '8px 12px', background: '#eaeaef', color: '#32324d', borderBottom: '2px solid #dcdce4', fontWeight: 600 },
   td: { padding: '8px 12px', borderBottom: '1px solid #eaeaef' },
   button: { padding: '10px 20px', borderRadius: '4px', border: 'none', cursor: 'pointer', fontWeight: 600, fontSize: '14px' },
   primaryButton: { background: '#4945ff', color: '#fff' },
