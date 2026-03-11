@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-03-11
+
+### Fixed
+
+- Normalize line endings from CRLF to LF in source files (`admin/src/styles.ts`, `packup.config.ts`)
+- Add `overrides` to `package.json` and bump `jest-environment-jsdom` version to fix test environment compatibility
+
+## [0.4.0] - 2026-03-11
+
+- Version bump (published to npm; no feature changes from 0.3.0)
+
 ## [0.3.0] - 2026-03-10
 
 ### Fixed
